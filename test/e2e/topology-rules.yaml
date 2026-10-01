@@ -1,9 +1,16 @@
 # Topology rules for mock-accel and dra-driver-cpu DRA drivers.
-# These ConfigMaps teach the coordinator how to read topology
-# attributes from each driver's ResourceSlices.
+# These ConfigMaps teach the coordinator how to read topology attributes
+# from each driver's ResourceSlices. They are input to the coordinator;
+# the coordinator publishes DeviceClasses, not coordinator ResourceSlices.
 #
-# Deploy these before the coordinator so it can map driver-specific
-# attribute names to standard topology attributes.
+# Apply this file before the coordinator reconciles so driver-specific
+# attributes can be mapped to standard topology attributes:
+#   numaNode, pcieRoot, and socket.
+#
+# Required fields for every topology rule are attribute, type, and driver.
+# partitioning: group makes the attribute split partition groups; info keeps
+# it as topology metadata. constraint: match adds a matchAttribute alignment
+# to expanded claims, and enforcement may be required or preferred.
 
 # --- mock-accel rules ---
 ---

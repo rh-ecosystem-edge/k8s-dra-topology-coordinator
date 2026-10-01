@@ -3,8 +3,8 @@
 #
 # Tests cross-driver topology partitioning using mock-accel (required)
 # and dra-driver-cpu (optional, tested if present). When both drivers
-# are available, validates that partitions contain devices from both
-# drivers grouped by shared NUMA topology.
+# are available, validates that generated DeviceClasses contain sub-resources
+# from both drivers grouped by shared NUMA topology.
 #
 # Usage:
 #   ./test/e2e/run-e2e.sh                    # uses current kubectl context
@@ -66,13 +66,22 @@ check_skip() {
     fi
 }
 
+check_optional() {
+    local desc=$1
+    shift
+    if "$@" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓ $desc${NC}"
+        pass=$((pass + 1))
+    else
+        echo -e "  ${YELLOW}⊘ $desc (not present in this topology)${NC}"
+        skip=$((skip + 1))
+    fi
+}
+
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
     kubectl delete -f "$SCRIPT_DIR/topology-rules.yaml" --ignore-not-found >/dev/null 2>&1 || true
     helm uninstall nodepartition --namespace default >/dev/null 2>&1 || true
-    # Wait for coordinator slices to be garbage collected
-    sleep 5
-    kubectl delete resourceslices -l "$LABEL_MANAGED" --ignore-not-found >/dev/null 2>&1 || true
     kubectl delete deviceclasses -l "$LABEL_MANAGED" --ignore-not-found >/dev/null 2>&1 || true
     echo -e "${GREEN}Cleanup complete${NC}"
 }
@@ -86,21 +95,6 @@ count_driver_slices() {
 import sys, json
 data = json.load(sys.stdin)
 print(len([s for s in data['items'] if s['spec']['driver'] == '$driver']))
-" 2>/dev/null || echo "0"
-}
-
-# count_driver_nodes returns the number of distinct nodes for a given driver
-count_driver_nodes() {
-    local driver=$1
-    kubectl get resourceslices -o json 2>/dev/null | \
-        python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-nodes = set()
-for s in data['items']:
-    if s['spec']['driver'] == '$driver' and s['spec'].get('nodeName'):
-        nodes.add(s['spec']['nodeName'])
-print(len(nodes))
 " 2>/dev/null || echo "0"
 }
 
@@ -172,7 +166,7 @@ if ! kubectl get pods -l app.kubernetes.io/name=nodepartition >/dev/null 2>&1; t
         --wait --timeout 60s 2>/dev/null || {
         # If helm install fails (image not available), try building locally
         echo -e "${YELLOW}  Helm install may need a locally available image.${NC}"
-        echo -e "${YELLOW}  Build with: make build && docker build -t ghcr.io/fabiendupont/nodepartition-controller:dev .${NC}"
+        echo -e "${YELLOW}  Build with: make build && docker build -t ghcr.io/rh-ecosystem-edge/nodepartition-controller:dev .${NC}"
     }
 fi
 
@@ -182,13 +176,13 @@ kubectl rollout status deployment -l app.kubernetes.io/component=controller --ti
 check "coordinator deployment ready" kubectl get deployment -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].status.readyReplicas}' 2>/dev/null
 echo
 
-# --- Wait for coordinator ResourceSlices ---
-echo -e "${YELLOW}Waiting for coordinator to publish ResourceSlices...${NC}"
+# --- Wait for coordinator DeviceClasses ---
+echo -e "${YELLOW}Waiting for coordinator to publish DeviceClasses...${NC}"
 ELAPSED=0
-COORD_SLICES=0
+DC_COUNT=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    COORD_SLICES=$(kubectl get resourceslices -l "$LABEL_MANAGED" --no-headers 2>/dev/null | wc -l)
-    if [ "$COORD_SLICES" -gt 0 ]; then
+    DC_COUNT=$(kubectl get deviceclasses -l "$LABEL_MANAGED" --no-headers 2>/dev/null | wc -l)
+    if [ "$DC_COUNT" -gt 0 ]; then
         break
     fi
     sleep 5
@@ -196,63 +190,47 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
     echo -e "  Waiting... ($ELAPSED/${TIMEOUT}s)"
 done
 
-check "coordinator ResourceSlices published ($COORD_SLICES)" [ "$COORD_SLICES" -gt 0 ]
+check "coordinator DeviceClasses published ($DC_COUNT)" [ "$DC_COUNT" -gt 0 ]
 echo
 
-if [ "$COORD_SLICES" -eq 0 ]; then
-    echo -e "${RED}No coordinator ResourceSlices found — aborting validation${NC}"
+if [ "$DC_COUNT" -eq 0 ]; then
+    echo -e "${RED}No coordinator DeviceClasses found — aborting validation${NC}"
     echo -e "${YELLOW}Check coordinator logs:${NC}"
     kubectl logs -l app.kubernetes.io/component=controller --tail=50 2>/dev/null || true
     exit 1
 fi
 
-# --- Validate ResourceSlices ---
-echo -e "${YELLOW}Validating coordinator ResourceSlices...${NC}"
+# --- Validate DeviceClasses ---
+echo -e "${YELLOW}Validating coordinator DeviceClasses...${NC}"
+DC_JSON=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o json 2>/dev/null)
+DC_NAMES=$(echo "$DC_JSON" | python3 -c "import sys,json; print('\\n'.join(sorted(dc['metadata']['name'] for dc in json.load(sys.stdin)['items'])))")
+echo -e "  DeviceClasses: ${GREEN}$DC_NAMES${NC}"
 
-# Check driver name
-DRIVER=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o jsonpath='{.items[0].spec.driver}' 2>/dev/null)
-check "driver name is $COORDINATOR_DRIVER" [ "$DRIVER" = "$COORDINATOR_DRIVER" ]
-
-# Check partition types exist
-PARTITION_TYPES=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-    python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-types = set()
-for s in data['items']:
-    for d in s['spec'].get('devices', []):
-        attrs = d.get('attributes', {})
-        pt = attrs.get('${COORDINATOR_DRIVER}/partitionType', {})
-        if 'stringValue' in pt:
-            types.add(pt['stringValue'])
-print(' '.join(sorted(types)))
-" 2>/dev/null)
-
+PARTITION_TYPES=$(echo "$DC_JSON" | python3 -c "import sys,json; print(' '.join(sorted({dc.get('metadata', {}).get('labels', {}).get('${COORDINATOR_DRIVER}/partitionType', '') for dc in json.load(sys.stdin)['items']} - {''})))")
 echo -e "  Partition types found: ${GREEN}$PARTITION_TYPES${NC}"
-check "eighth partitions exist" echo "$PARTITION_TYPES" | grep -q "eighth"
-check "quarter partitions exist" echo "$PARTITION_TYPES" | grep -q "quarter"
-check "full partitions exist" echo "$PARTITION_TYPES" | grep -q "full"
+check "pcieroot partition type exists" grep -q "pcieroot" <<< "$PARTITION_TYPES"
+check "full partition type exists" grep -q "full" <<< "$PARTITION_TYPES"
+check_optional "numa partition type exists" grep -q "numa" <<< "$PARTITION_TYPES"
 
-# Check node coverage — coordinator should cover all nodes that have mock-accel devices
-COORD_NODES=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u | wc -l)
-MOCK_NODES=$(count_driver_nodes "$MOCK_ACCEL_DRIVER")
-check "coordinator covers all mock-accel nodes ($COORD_NODES/$MOCK_NODES)" [ "$COORD_NODES" -eq "$MOCK_NODES" ]
+DC_SELECTORS=$(echo "$DC_JSON" | python3 -c "import sys,json; print('yes' if any(dc.get('spec', {}).get('selectors') for dc in json.load(sys.stdin)['items']) else 'no')")
+check "DeviceClass has a CEL selector" [ "$DC_SELECTORS" = "yes" ]
 
-# Check device count attributes include mock-accel
-MOCK_ACCEL_DEVICE_COUNTS=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-    python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-found = False
-for s in data['items']:
-    for d in s['spec'].get('devices', []):
-        for attr_name in d.get('attributes', {}):
-            if 'deviceCount_' in attr_name and 'mock-accel' in attr_name:
-                found = True
-                break
-print('yes' if found else 'no')
+PARTITION_CONFIG_HAS_MOCK=$(echo "$DC_JSON" | python3 -c "
+import json, sys
+for dc in json.load(sys.stdin)['items']:
+    for cfg in dc.get('spec', {}).get('config', []):
+        opaque = cfg.get('opaque') or {}
+        if opaque.get('driver') != '$COORDINATOR_DRIVER':
+            continue
+        params = opaque.get('parameters', {})
+        if isinstance(params, str):
+            params = json.loads(params)
+        if any('mock-accel' in sr.get('deviceClass', '') for sr in params.get('subResources', [])):
+            print('yes')
+            sys.exit(0)
+print('no')
 " 2>/dev/null)
-check "device count attributes include mock-accel" [ "$MOCK_ACCEL_DEVICE_COUNTS" = "yes" ]
+check "PartitionConfig references mock-accel sub-resources" [ "$PARTITION_CONFIG_HAS_MOCK" = "yes" ]
 
 echo
 
@@ -260,24 +238,24 @@ echo
 if [ "$HAS_CPU_DRIVER" = true ]; then
     echo -e "${YELLOW}Validating cross-driver partitioning (mock-accel + dra-driver-cpu)...${NC}"
 
-    # Check that device counts include CPU driver
-    CPU_DEVICE_COUNTS=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-        python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-found = False
-for s in data['items']:
-    for d in s['spec'].get('devices', []):
-        for attr_name in d.get('attributes', {}):
-            if 'deviceCount_' in attr_name and 'dra.cpu' in attr_name:
-                found = True
-                break
-print('yes' if found else 'no')
+    PARTITION_CONFIG_HAS_CPU=$(echo "$DC_JSON" | python3 -c "
+import json, sys
+for dc in json.load(sys.stdin)['items']:
+    for cfg in dc.get('spec', {}).get('config', []):
+        opaque = cfg.get('opaque') or {}
+        if opaque.get('driver') != '$COORDINATOR_DRIVER':
+            continue
+        params = opaque.get('parameters', {})
+        if isinstance(params, str):
+            params = json.loads(params)
+        if any('dra.cpu' in sr.get('deviceClass', '') for sr in params.get('subResources', [])):
+            print('yes')
+            sys.exit(0)
+print('no')
 " 2>/dev/null)
-    check "device count attributes include dra-driver-cpu" [ "$CPU_DEVICE_COUNTS" = "yes" ]
+    check "PartitionConfig references dra-driver-cpu sub-resources" [ "$PARTITION_CONFIG_HAS_CPU" = "yes" ]
 
-    # Check that both drivers' nodes overlap (they should — both run on the same nodes)
-    CPU_NODES=$(count_driver_nodes "$CPU_DRIVER")
+    # Check that both drivers' input slices overlap on at least one node.
     SHARED_NODES=$(kubectl get resourceslices -o json 2>/dev/null | \
         python3 -c "
 import sys, json
@@ -296,105 +274,38 @@ print(len(mock_nodes & cpu_nodes))
 " 2>/dev/null)
     check "drivers share nodes ($SHARED_NODES nodes with both mock-accel + cpu)" [ "$SHARED_NODES" -gt 0 ]
 
-    # Validate partition profile includes both drivers
-    PARTITION_PROFILES=$(kubectl get resourceslices -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-        python3 -c "
+    PARTITION_PROFILES=$(echo "$DC_JSON" | python3 -c "
 import sys, json
-data = json.load(sys.stdin)
-profiles = set()
-for s in data['items']:
-    for d in s['spec'].get('devices', []):
-        attrs = d.get('attributes', {})
-        profile = attrs.get('${COORDINATOR_DRIVER}/profile', {})
-        if 'stringValue' in profile:
-            profiles.add(profile['stringValue'])
-for p in sorted(profiles):
-    print(p)
+profiles = {dc.get('metadata', {}).get('labels', {}).get('${COORDINATOR_DRIVER}/profile', '') for dc in json.load(sys.stdin)['items']}
+for profile in sorted(profiles - {''}):
+    print(profile)
 " 2>/dev/null)
     echo -e "  Partition profiles: ${GREEN}${PARTITION_PROFILES}${NC}"
-
-    # Profile name should reference both drivers when both are present
-    MULTI_DRIVER_PROFILE=$(echo "$PARTITION_PROFILES" | grep -c ".*_.*" || true)
+    MULTI_DRIVER_PROFILE=$(echo "$PARTITION_PROFILES" | grep -c "mock-accel.*dra.cpu\|dra.cpu.*mock-accel" || true)
     check "partition profile reflects multiple drivers" [ "$MULTI_DRIVER_PROFILE" -gt 0 ]
 
+    NUMA_SELECTORS_HAVE_BOTH_DRIVERS=$(echo "$DC_JSON" | python3 -c "
+import json, sys
+drivers = set()
+for dc in json.load(sys.stdin)['items']:
+    for cfg in dc.get('spec', {}).get('config', []):
+        opaque = cfg.get('opaque') or {}
+        if opaque.get('driver') != '$COORDINATOR_DRIVER':
+            continue
+        params = opaque.get('parameters', {})
+        if isinstance(params, str):
+            params = json.loads(params)
+        for sr in params.get('subResources', []):
+            if any('numaNode' in selector for selector in sr.get('selectors', [])):
+                if 'mock-accel' in sr.get('deviceClass', ''):
+                    drivers.add('mock')
+                if 'dra.cpu' in sr.get('deviceClass', ''):
+                    drivers.add('cpu')
+print('yes' if drivers == {'mock', 'cpu'} else 'no')
+" 2>/dev/null)
+    check "PartitionConfig has per-driver NUMA selectors" [ "$NUMA_SELECTORS_HAVE_BOTH_DRIVERS" = "yes" ]
+
     echo
-fi
-
-# --- Validate DeviceClasses ---
-echo -e "${YELLOW}Validating DeviceClasses...${NC}"
-DC_COUNT=$(kubectl get deviceclasses -l "$LABEL_MANAGED" --no-headers 2>/dev/null | wc -l)
-check "DeviceClasses created ($DC_COUNT)" [ "$DC_COUNT" -gt 0 ]
-
-if [ "$DC_COUNT" -gt 0 ]; then
-    DC_NAMES=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
-    echo -e "  DeviceClasses: ${GREEN}$DC_NAMES${NC}"
-
-    # Check DeviceClass has selectors
-    DC_SELECTORS=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o jsonpath='{.items[0].spec.selectors}' 2>/dev/null)
-    check "DeviceClass has selectors" [ -n "$DC_SELECTORS" ]
-
-    # Check DeviceClass has opaque config
-    DC_CONFIG=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o jsonpath='{.items[0].spec.config}' 2>/dev/null)
-    check "DeviceClass has config" [ -n "$DC_CONFIG" ]
-
-    # Validate PartitionConfig sub-resources reference mock-accel
-    PARTITION_CONFIG_HAS_MOCK=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-        python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for dc in data['items']:
-    for cfg in dc['spec'].get('config', []):
-        opaque = cfg.get('opaque', {})
-        if opaque.get('driver') != '$COORDINATOR_DRIVER':
-            continue
-        params = json.loads(opaque.get('parameters', '{}'))
-        for sr in params.get('subResources', []):
-            if 'mock-accel' in sr.get('deviceClass', ''):
-                print('yes')
-                sys.exit(0)
-print('no')
-" 2>/dev/null)
-    check "PartitionConfig references mock-accel sub-resources" [ "$PARTITION_CONFIG_HAS_MOCK" = "yes" ]
-
-    # If CPU driver present, check PartitionConfig also references it
-    if [ "$HAS_CPU_DRIVER" = true ]; then
-        PARTITION_CONFIG_HAS_CPU=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-            python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for dc in data['items']:
-    for cfg in dc['spec'].get('config', []):
-        opaque = cfg.get('opaque', {})
-        if opaque.get('driver') != '$COORDINATOR_DRIVER':
-            continue
-        params = json.loads(opaque.get('parameters', '{}'))
-        for sr in params.get('subResources', []):
-            if 'dra.cpu' in sr.get('deviceClass', ''):
-                print('yes')
-                sys.exit(0)
-print('no')
-" 2>/dev/null)
-        check "PartitionConfig references dra-driver-cpu sub-resources" [ "$PARTITION_CONFIG_HAS_CPU" = "yes" ]
-
-        # Validate alignments include NUMA constraint spanning both drivers
-        ALIGNMENT_HAS_NUMA=$(kubectl get deviceclasses -l "$LABEL_MANAGED" -o json 2>/dev/null | \
-            python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for dc in data['items']:
-    for cfg in dc['spec'].get('config', []):
-        opaque = cfg.get('opaque', {})
-        if opaque.get('driver') != '$COORDINATOR_DRIVER':
-            continue
-        params = json.loads(opaque.get('parameters', '{}'))
-        for al in params.get('alignments', []):
-            if 'numaNode' in al.get('attribute', '') and len(al.get('requests', [])) > 1:
-                print('yes')
-                sys.exit(0)
-print('no')
-" 2>/dev/null)
-        check "PartitionConfig has NUMA alignment across drivers" [ "$ALIGNMENT_HAS_NUMA" = "yes" ]
-    fi
 fi
 
 echo

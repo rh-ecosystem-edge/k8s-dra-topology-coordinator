@@ -5,6 +5,8 @@ commonAnnotations: {}
 
 driverName: "nodepartition.dra.k8s.io"
 
+# auto publishes fixed partitions and groupings; partitions or groupings
+# restrict the controller to one output family.
 partitionMode: "auto"
 
 controller:
@@ -27,6 +29,7 @@ controller:
     port: 9443
     tls:
       # mode: openshift | cert-manager | manual
+      # cert-manager mode expects the issuer below to already exist.
       mode: "cert-manager"
       certManager:
         issuerName: "selfsigned-issuer"

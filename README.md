@@ -1,166 +1,135 @@
 # Node Partition Topology Coordinator
 
-A Kubernetes controller and mutating webhook for [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) that lets users request a logical partition of a node — like "a quarter of an HGX B200" — without knowing anything about DRA drivers, device attributes, or topology constraints.
+The Node Partition Topology Coordinator is a Kubernetes controller and mutating webhook for [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/). It lets workloads request a logical partition of a node without knowing which DRA drivers, device attributes, or topology constraints provide that partition.
 
-## The Problem
+The coordinator does not replace the scheduler or the DRA drivers. It watches the drivers' `ResourceSlice` objects, publishes topology-aware `DeviceClass` objects, and expands partition claims into the individual device requests required by the scheduler.
 
-AI/HPC workloads need GPUs, NICs, CPUs, and memory co-located on the same NUMA boundary. Cross-NUMA device placement can degrade throughput by 30–50% and prevent GPU Direct RDMA entirely.
+## How it works
 
-Kubernetes DRA allocates each resource type independently. A GPU may land on NUMA node 0 while its NIC lands on NUMA node 1, with no mechanism to prevent this. Writing correct claims requires knowing:
+```mermaid
+flowchart LR
+    Inputs["DRA drivers<br/>ResourceSlices<br/><br/>Topology and grouping ConfigMaps"] --> Controller["Topology coordinator<br/>controller"]
+    Controller --> Classes["Managed DeviceClasses<br/>PartitionConfig"]
+    Claim["Workload ResourceClaim"] --> Webhook["Mutating webhook"]
+    Classes --> Webhook
+    Webhook --> Expanded["Expanded claim"] --> Scheduler["kube-scheduler"]
+```
 
-- Which DRA drivers are installed and what attributes they publish
-- That driver A calls it `gpu.amd.com/numaNode` while driver B calls it `dra.cpu/numaNodeID`
-- How to wire `matchAttribute` constraints across multiple device requests
-- Which attribute values to hard-code for cross-driver alignment
+The leader-elected controller:
 
-Users shouldn't need to know any of this.
+- reads `ResourceSlice` topology from all DRA drivers;
+- computes fixed partitions and administrator-defined device groupings;
+- publishes coordinator-managed `DeviceClass` objects with CEL selectors and opaque `PartitionConfig` data; and
+- removes stale coordinator-managed `DeviceClass` objects during reconciliation.
 
-## What This Project Does
+The webhook runs on every replica and:
 
-The coordinator is an **abstraction layer**. Users request a partition by name:
+- expands a partition `ResourceClaim` into its driver-specific sub-resource requests;
+- adds per-driver topology selectors and any configured `matchAttribute` constraints;
+- injects VFIO configuration for supported passthrough devices when needed; and
+- rewrites Pod and KubeVirt VMI references to the expanded request names.
+
+Ordinary DRA claims that do not reference a coordinator `PartitionConfig` pass through unchanged. No scheduler plugin is required.
+
+## Partition outputs
+
+The controller publishes `DeviceClass` objects for the topology it discovers. The fixed partition classes are:
+
+| Partition type | Scope |
+| --- | --- |
+| `pcieroot` | Devices attached to one PCIe root complex, with proportional CPU or memory capacity where available |
+| `numa` | Devices grouped within one NUMA topology group |
+| `full` | The complete effective device set for a node |
+
+Aggregate classes are also published with names such as `pcieroot`, `numa`, and `full`. When the hardware has a recognizable PCIe-root fraction, the controller may publish tier aliases such as `eighth`, `quarter`, `half`, or `sixth`. These aliases are hardware-dependent; inspect the generated classes before selecting one:
+
+```sh
+kubectl get deviceclasses \
+  -l nodepartition.dra.k8s.io/managed=true
+```
+
+Profile-specific and grouping classes may also be present. DeviceClass names are derived from the participating DRA drivers and topology shape, so they should be discovered from the cluster rather than hard-coded across hardware profiles.
+
+### Default `auto` output
+
+The Helm chart and controller default to `auto`. With devices available, this mode produces the following baseline output where the corresponding topology exists:
+
+| Generated class | When it appears | Notes |
+| --- | --- | --- |
+| `full` | The topology model has devices for a node | Represents the complete effective device set |
+| `pcieroot` | Devices expose PCIe-root topology | Aggregate class for one-root partitions |
+| `numa` | More than one NUMA partition is discovered | Aggregate class for NUMA-local partitions |
+| `eighth`, `quarter`, `half`, etc. | A fixed partition maps to a recognized PCIe-root fraction | Tier alias; the exact set depends on hardware |
+| Profile-specific classes | A concrete driver/topology profile is discovered | Names include driver and topology details |
+| Grouping classes | PCIe pairings or grouping ConfigMaps are available | Published alongside fixed partitions in `auto` mode |
+
+Tier aliases are labels on the underlying fixed partition type. For example, a `quarter` class normally has `tierName=quarter` and `partitionType=numa`; the generated labels and `PartitionConfig` are the source of truth for a particular cluster.
+
+## Discover available DeviceClasses
+
+List only the classes managed by the coordinator and include their partition, profile, tier, and coupling labels:
+
+```sh
+kubectl get deviceclasses \
+  -l nodepartition.dra.k8s.io/managed=true \
+  --show-labels
+```
+
+You can filter by the generated labels when looking for a particular class:
+
+```sh
+kubectl get deviceclasses \
+  -l nodepartition.dra.k8s.io/managed=true,nodepartition.dra.k8s.io/tierName=quarter
+```
+
+Inspect a candidate class before using it in a `ResourceClaim`:
+
+```sh
+kubectl get deviceclass <name> -o yaml
+```
+
+The YAML shows the coordinator CEL selector and the opaque `PartitionConfig`, including the underlying DRA device classes, counts, selectors, capacities, and alignment rules.
+
+## Partition modes
+
+The controller accepts `--partition-mode` and the Helm chart exposes the same setting as `partitionMode`:
+
+| Mode | Behavior |
+| --- | --- |
+| `auto` (default) | Publishes fixed partitions and grouping classes discovered from PCIe pairings or grouping ConfigMaps |
+| `partitions` | Publishes fixed `pcieroot`, `numa`, and `full` partition classes only |
+| `groupings` | Publishes grouping classes only |
+
+For example:
+
+```sh
+helm install nodepartition deploy/helm/nodepartition \
+  --set partitionMode=partitions
+```
+
+## Requesting a partition
+
+First inspect the generated classes and choose a class available in the target cluster. A partition request looks like this:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
+metadata:
+  name: accelerator-partition
 spec:
   devices:
     requests:
-    - name: my-partition
-      deviceClassName: hgx-b200-quarter
-      count: 1
+      - name: partition
+        exactly:
+          deviceClassName: quarter
+          count: 1
 ```
 
-The coordinator automatically expands this into the complex multi-device claim that the scheduler needs — with the right device classes, counts, and alignment constraints for the specific hardware in the cluster:
+During admission, the webhook expands the partition request into the underlying DRA device classes and adds the selectors and constraints encoded in the class's opaque `PartitionConfig`. The exact expansion depends on the drivers and topology present on the cluster.
 
-```
-User creates:                        Webhook expands to:
-┌──────────────────────────┐         ┌─────────────────────────────────┐
-│ ResourceClaim            │         │ ResourceClaim                   │
-│   requests:              │         │   requests:                     │
-│   - name: my-partition   │  ────►  │   - name: my-partition-gpu      │
-│     deviceClassName:     │         │     deviceClassName: gpu.nvidia │
-│       hgx-b200-quarter   │         │     count: 2                    │
-│     count: 1             │         │   - name: my-partition-rdma     │
-└──────────────────────────┘         │     deviceClassName: rdma.mlnx  │
-                                     │     count: 1                    │
-                                     │   constraints:                  │
-                                     │   - matchAttribute: numaNode    │
-                                     │     requests: [my-partition-gpu,│
-                                     │       my-partition-rdma]        │
-                                     └─────────────────────────────────┘
-```
+## Topology rules
 
-The expanded claim's `matchAttribute` constraints serve double duty:
-
-- **Device alignment** — the allocator only picks devices that share the same NUMA node
-- **Node filtering** — the scheduler rejects nodes where no NUMA node has all the required devices available
-
-No scheduler plugin is needed. The standard kube-scheduler handles everything.
-
-## Partition Types
-
-The coordinator discovers hardware topology automatically and publishes DeviceClasses for each partition granularity:
-
-| Partition | Scope | Example |
-|-----------|-------|---------|
-| **eighth** | One PCIe root complex | 1 GPU + 1 NIC |
-| **quarter** | One NUMA node | 2 GPUs + 2 NICs |
-| **half** | One CPU socket | 4 GPUs + 4 NICs |
-| **full** | Entire node | 8 GPUs + 8 NICs |
-
-DeviceClass names are generated from the hardware profile (e.g., `gpu-nvidia-com-8-rdma-mellanox-com-8-quarter`). Users pick the partition size that matches their workload.
-
-## Soft Affinity
-
-Not all constraints need to be hard. Topology rules support two enforcement modes:
-
-| Mode | Behavior |
-|------|----------|
-| `required` (default) | Constraint is always emitted. Pod fails to schedule if unsatisfiable. |
-| `preferred` | Constraint is emitted only when the topology model confirms it can be satisfied. If no node can provide alignment, the constraint is dropped and the pod schedules without it. |
-
-This lets administrators express policies like "enforce PCIe alignment, prefer NUMA alignment":
-
-```yaml
-# PCIe alignment rule — hard constraint
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: pcie-rule
-  labels:
-    nodepartition.dra.k8s.io/topology-rule: "true"
-data:
-  attribute: resource.kubernetes.io/pcieRoot
-  type: string
-  driver: mock-accel.example.com
-  constraint: match
-  enforcement: required
-
----
-# NUMA alignment rule — best-effort
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: numa-rule
-  labels:
-    nodepartition.dra.k8s.io/topology-rule: "true"
-data:
-  attribute: mock-accel.example.com/numaNode
-  type: int
-  driver: mock-accel.example.com
-  mapsTo: numaNode
-  partitioning: group
-  constraint: match
-  enforcement: preferred
-```
-
-The webhook checks the current cluster topology at claim expansion time. If NUMA alignment is achievable on at least one node, the `matchAttribute` constraint is emitted. If not, it's skipped — the pod schedules with PCIe alignment only.
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                      Kubernetes API                            │
-│                                                                │
-│  ResourceSlices ◄── GPU driver, NIC driver, CPU driver, etc.   │
-│  DeviceClasses  ◄── Topology Coordinator (controller)          │
-│  ResourceClaims ◄── User creates → webhook mutates → scheduler │
-└──────┬───────────────────┬───────────────────────┬─────────────┘
-       │ watch             │ publish               │ mutate
-       ▼                   ▼                       ▼
-┌────────────────────────────────────────────────────────────────┐
-│              Topology Coordinator (single binary)              │
-│                                                                │
-│  ┌─────────────┐  ┌──────────────┐       ┌──────────────────┐  │
-│  │  Topology   │  │  DeviceClass │       │    Webhook       │  │
-│  │   Model     ├──►  Manager     │       │ (claim expander) │  │
-│  │  + Rules    │  │              │       │                  │  │
-│  └──────▲──────┘  └──────────────┘       └────────┬─────────┘  │
-│         │                                         │            │
-│  watches ResourceSlices              reads DeviceClass         │
-│  watches ConfigMaps                  PartitionConfig           │
-│  (leader election)                   checks topology model     │
-│                                      (all replicas)            │
-└────────────────────────────────────────────────────────────────┘
-```
-
-The controller and webhook run in the same binary:
-- **Controller** (leader-only): watches ResourceSlices from all DRA drivers, builds a cross-driver topology model, computes aligned partitions, and publishes DeviceClasses with embedded `PartitionConfig`
-- **Webhook** (all replicas): intercepts ResourceClaim creation, reads `PartitionConfig` from DeviceClass, evaluates preferred constraints against the topology model, and expands into multi-request claims with alignment constraints
-
-## Topology Rules
-
-Topology rules are defined via ConfigMaps with the `nodepartition.dra.k8s.io/topology-rule: "true"` label. They bridge the gap between vendor-specific driver attributes and the coordinator's topology model, so the coordinator works with any DRA driver without requiring standardized attribute names.
-
-Rules can:
-- **Map** driver-specific attributes to standard topology attributes (`mapsTo: numaNode|pcieRoot|socket`)
-- **Group** devices by vendor-specific attributes for finer-grained partitioning
-- **Constrain** expanded claims with `matchAttribute` alignment
-- **Control enforcement** — hard (`required`) or best-effort (`preferred`)
-
-### Example: Mock-Accel DRA Driver
-
-Map driver-specific `numaNode` to the coordinator's standard NUMA attribute:
+Topology rules are ConfigMaps labeled `nodepartition.dra.k8s.io/topology-rule: "true"`. They map driver-specific attributes to the coordinator's standard topology model and can add claim constraints.
 
 ```yaml
 apiVersion: v1
@@ -175,143 +144,166 @@ data:
   driver: mock-accel.example.com
   mapsTo: numaNode
   partitioning: group
+  constraint: match
+  enforcement: required
 ```
 
-### Example: NVIDIA NVLink Domain Grouping
+Rule fields:
 
-Group GPUs by NVLink domain so partitions respect NVLink connectivity:
+| Field | Required | Values | Purpose |
+| --- | --- | --- | --- |
+| `attribute` | yes | Qualified attribute name | Attribute published by the driver |
+| `type` | yes | `int`, `string`, `bool` | Attribute value type |
+| `driver` | yes | DRA driver name | Driver that owns the attribute |
+| `mapsTo` | no | `numaNode`, `pcieRoot`, `socket` | Standard topology attribute used for grouping |
+| `partitioning` | no | `group`, `info` | Whether equal values form separate partition groups; defaults to `info` |
+| `constraint` | no | `match`, `none` | Whether matching devices are constrained in expanded claims; defaults to `none` |
+| `enforcement` | no | `required`, `preferred` | Whether a match constraint is hard or best-effort; defaults to `required` |
+| `fallbackAttribute` | no | Qualified attribute name | Looser attribute to use when the primary match cannot be satisfied |
+| `deviceClass` | no | DeviceClass name | Overrides the driver's default class name for generated sub-requests |
+| `description` | no | Free-form text | Human-readable rule description |
+
+The coordinator supplies a built-in `resource.kubernetes.io/pcieRoot` match rule with NUMA fallback unless an explicit PCIe-root match rule is configured. Driver-specific NUMA rules still generate per-driver CEL selectors, because different drivers may use different attribute names.
+
+`preferred` constraints are emitted only when the topology model can satisfy them. A `required` constraint is retained even when no placement can satisfy it, so the workload remains unschedulable instead of silently losing the requested alignment.
+
+## Device groupings
+
+Device groupings describe a named combination of DRA device classes that should be co-located. They are ConfigMaps labeled `nodepartition.dra.k8s.io/device-grouping: "true"`:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nvlink-rule
+  name: gpu-nic-pair
   labels:
-    nodepartition.dra.k8s.io/topology-rule: "true"
+    nodepartition.dra.k8s.io/device-grouping: "true"
 data:
-  attribute: gpu.nvidia.com/nvlinkDomain
-  type: int
-  driver: gpu.nvidia.com
-  mapsTo: ""
-  partitioning: group
-  constraint: match
+  name: gpu-nic-pair
+  alignment: pcieRoot
+  fallback: numaNode
+  devices: |
+    - class: gpu.example.com
+      count: 1
+    - class: rdma.example.com
+      count: 1
 ```
 
-### Rule Fields
+`alignment` and `fallback` accept `pcieRoot`, `numaNode`, or `socket`. Device entries require `class` and a positive `count`; each entry may also provide a `capacity` map for consumable DRA capacity.
 
-| Field | Required | Values | Description |
-|-------|----------|--------|-------------|
-| `attribute` | yes | qualified name | Device attribute to read (e.g., `gpu.nvidia.com/nvlinkDomain`) |
-| `type` | yes | `int`, `string`, `bool` | Attribute value type |
-| `driver` | yes | driver name | DRA driver that publishes this attribute |
-| `mapsTo` | no | `numaNode`, `pcieRoot`, `socket` | Map to standard topology attribute |
-| `partitioning` | no | `group`, `info` | How attribute affects partition grouping (default: `info`) |
-| `constraint` | no | `match`, `none` | Whether expanded claims must match on this attribute (default: `none`) |
-| `enforcement` | no | `required`, `preferred` | Whether constraint is hard or best-effort (default: `required`) |
+## Driver requirements
 
-## Driver Compatibility
+The coordinator can work with any DRA driver that publishes usable topology information in `ResourceSlice` objects. For topology-aware partitions, configure rules for the driver-specific NUMA, PCIe-root, socket, or other attributes that the cluster exposes.
 
-The coordinator works with any DRA driver that publishes topology attributes in its ResourceSlices. Topology rules map driver-specific attribute names to the coordinator's standard model.
+The repository's E2E workflow exercises:
 
-### What Drivers Need to Publish
+- [mock-device](https://github.com/fabiendupont/mock-device) as the required mock accelerator driver; and
+- [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu) as an optional CPU driver in individual mode.
 
-For NUMA-aware partitioning, a driver must publish at least one attribute that identifies which NUMA node a device belongs to. The attribute name and format don't matter — topology rules handle the mapping.
-
-### Known DRA Drivers
-
-| Driver | NUMA Attribute | PCIe Attribute | Status |
-|--------|---------------|----------------|--------|
-| [mock-device](https://github.com/fabiendupont/mock-device) | `mock-accel.example.com/numaNode` | `mock-accel.example.com/pciAddress` | Works today (test driver) |
-| [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu) | `dra.cpu/numaNodeID` | N/A | Works today (individual mode) |
-| [AMD GPU DRA](https://github.com/ROCm/k8s-gpu-dra-driver) | `gpu.amd.com/numaNode` | `resource.kubernetes.io/pcieRoot` | Works today |
-| [NVIDIA GPU DRA](https://github.com/NVIDIA/k8s-dra-driver-gpu) | VFIO type only (`gpu.nvidia.com/numa`) | `resource.kubernetes.io/pcieRoot` | Blocked: no NUMA for standard GPU/MIG types |
-| [dra-driver-memory](https://github.com/kad/dra-driver-memory) | `dra.memory/numaNode` | N/A | Early development |
-| [SR-IOV NIC DRA](https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin) | `dra.net/numaNode` | `resource.kubernetes.io/pciBusID` | Works today |
-
-### Upstream Standardization
-
-There is no `resource.kubernetes.io/numaNode` standard attribute today — each driver uses its own name. The coordinator's topology rules bridge this gap. KEP-5491 proposes standardizing NUMA as a list-typed attribute, which would simplify rules but is not yet merged. The coordinator will continue to add value after standardization through the partition abstraction and automatic claim expansion.
+Other drivers require their actual `ResourceSlice` driver names, DeviceClass names, attribute types, and topology attributes to be configured in rules. The coordinator does not assume a universal vendor attribute naming scheme.
 
 ## Prerequisites
 
-- Go 1.25+
-- Kubernetes 1.34+ (with DRA enabled)
+- Kubernetes 1.34 or newer with DRA enabled;
+- Go 1.25 or newer for local development;
+- `kubectl` and Helm for cluster installation; and
+- cert-manager, an OpenShift serving-certificate controller, or a manually provisioned webhook certificate, depending on the selected TLS mode.
 
-## Build
+The Helm chart declares a default cert-manager issuer of `selfsigned-issuer` but does not create that issuer. Create or configure an issuer before installing with the default TLS mode.
 
-```sh
-make build         # produces bin/nodepartition-controller
-make test          # run tests (unit + envtest integration + property)
-make test-coverage # run tests with HTML coverage report
-make lint          # run golangci-lint
-```
-
-## Container Image
+## Build and test
 
 ```sh
-docker build -t nodepartition-controller .
+make build          # bin/nodepartition-controller
+make setup-envtest  # download Kubernetes 1.34 envtest assets
+make test           # unit, integration, and property tests
+make test-coverage
+make lint
 ```
 
-## Configuration
+`make test` obtains the envtest assets automatically when they are not already available. `make dev` runs dependency download, formatting, vet, lint, tests, and build.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--kubeconfig` | *(in-cluster)* | Path to kubeconfig file |
-| `--driver-name` | `nodepartition.dra.k8s.io` | Coordinator identifier for DeviceClass labels |
-| `--shutdown-timeout` | `30s` | Graceful shutdown timeout |
-| `--leader-election-namespace` | `kube-system` | Namespace for leader election lease |
-| `--leader-election-id` | `nodepartition-controller` | Leader election lease name |
-| `--webhook-port` | `9443` | Port for the mutating webhook HTTPS server |
-| `--tls-cert` | `/etc/webhook/tls/tls.crt` | Path to TLS certificate |
-| `--tls-key` | `/etc/webhook/tls/tls.key` | Path to TLS private key |
-
-## Helm
+Build the container image with:
 
 ```sh
-helm install nodepartition deploy/helm/nodepartition
+docker build -t nodepartition-controller:dev .
 ```
+
+The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`.
+
+## Helm installation
+
+```sh
+helm install nodepartition deploy/helm/nodepartition \
+  --namespace nodepartition \
+  --create-namespace
+```
+
+To use a locally built or privately published image:
+
+```sh
+helm install nodepartition deploy/helm/nodepartition \
+  --namespace nodepartition \
+  --create-namespace \
+  --set controller.image.repository=nodepartition-controller \
+  --set controller.image.tag=dev \
+  --set controller.image.pullPolicy=IfNotPresent
+```
+
+The chart installs a cluster-scoped controller with leader election, RBAC for DRA resources, a webhook Service, and mutating webhook rules for ResourceClaims. Pod and KubeVirt VMI admission rules are best-effort (`failurePolicy: Ignore`); ResourceClaim admission fails closed (`failurePolicy: Fail`).
 
 ### Webhook TLS
 
-The webhook requires TLS. Three modes are supported:
+The webhook listens on port `9443` and requires the TLS Secret named `<release-fullname>-webhook-tls`:
 
-| Mode | `webhook.tls.mode` | How it works |
-|------|--------------------|-------------|
-| **cert-manager** | `cert-manager` (default) | Creates a Certificate resource; cert-manager provisions the TLS Secret |
-| **OpenShift** | `openshift` | Annotates the Service for OpenShift serving CA auto-provisioning |
-| **Manual** | `manual` | User provides a TLS Secret and sets `caBundle` |
+| Mode | Value | Requirement |
+| --- | --- | --- |
+| cert-manager | `controller.webhook.tls.mode=cert-manager` | A matching `Issuer` or `ClusterIssuer` already exists; the chart creates a `Certificate` |
+| OpenShift | `controller.webhook.tls.mode=openshift` | OpenShift service-serving certificate injection is available |
+| Manual | `controller.webhook.tls.mode=manual` | Create the expected Secret and set `controller.webhook.tls.caBundle` |
 
-See `deploy/helm/nodepartition/values.yaml` for all configurable values.
+See [`deploy/helm/nodepartition/values.yaml`](deploy/helm/nodepartition/values.yaml) for all chart values.
+
+After installation, check the deployment, webhook Service, and generated classes:
+
+```sh
+kubectl -n nodepartition rollout status deployment/nodepartition-controller
+kubectl -n nodepartition get service
+kubectl get deviceclasses -l nodepartition.dra.k8s.io/managed=true
+```
 
 ## Observability
 
-Prometheus metrics at `:8081/metrics`:
+The controller exposes health and Prometheus endpoints on port `8081`:
+
+```sh
+kubectl -n nodepartition port-forward deployment/nodepartition-controller 8081:8081
+curl http://127.0.0.1:8081/healthz
+curl http://127.0.0.1:8081/metrics
+```
+
+The registered controller metrics are:
 
 | Metric | Type | Description |
-|--------|------|-------------|
-| `nodepartition_controller_reconciliation_duration_seconds` | Histogram | Reconciliation cycle duration |
+| --- | --- | --- |
+| `nodepartition_controller_reconciliation_duration_seconds` | Histogram | Reconciliation duration |
 | `nodepartition_controller_reconciliation_errors_total` | Counter | Reconciliation errors |
-| `nodepartition_controller_nodes_total` | Gauge | Nodes with topology information |
-| `nodepartition_controller_deviceclasses_total` | Gauge | Managed DeviceClasses |
+| `nodepartition_controller_nodes_total` | Gauge | Nodes represented in the current topology result |
+| `nodepartition_controller_deviceclasses_total` | Gauge | Managed partition and grouping DeviceClasses |
 | `nodepartition_controller_topology_rules_total` | Gauge | Active topology rules |
-| `nodepartition_webhook_expansions_total` | Counter | Partition claims expanded |
-| `nodepartition_webhook_errors_total` | Counter | Webhook errors |
 
-Health check at `:8081/healthz`.
+## End-to-end testing
 
-## E2E Testing
-
-See [test/e2e/README.md](test/e2e/README.md) for end-to-end testing with the [mock-device](https://github.com/fabiendupont/mock-device) DRA driver.
+See [`test/e2e/README.md`](test/e2e/README.md) for cluster setup, image loading, topology rule deployment, and validation with mock-device and dra-driver-cpu.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Run `make dev` (format, vet, lint, test, build)
-4. Submit a pull request
+```sh
+make dev
+```
 
-All commits must include a `Signed-off-by` line (`git commit -s`).
+Create a feature branch, run the development checks, and submit a pull request. Commits should include a `Signed-off-by` line (`git commit -s`).
 
 ## License
 
-Apache 2.0 — see [LICENSE.header](LICENSE.header).
+Apache 2.0 — see [`LICENSE.header`](LICENSE.header).

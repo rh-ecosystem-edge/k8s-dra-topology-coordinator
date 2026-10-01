@@ -2,9 +2,21 @@ Node Partition Topology Coordinator deployed.
 
 Controller: {{ include "nodepartition.fullname" . }}-controller
 Driver name: {{ .Values.driverName }}
+Partition mode: {{ .Values.partitionMode }}
 
 The controller watches ResourceSlices from all DRA drivers and publishes
-aligned partition ResourceSlices for topology-aware scheduling.
+coordinator-managed DeviceClasses with opaque PartitionConfig data. The
+webhook expands partition ResourceClaims into driver-specific requests.
 
-To check the status:
-  kubectl get deployment {{ include "nodepartition.fullname" . }}-controller -n {{ .Release.Namespace }}
+Check the controller and webhook Service:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "nodepartition.fullname" . }}-controller
+  kubectl -n {{ .Release.Namespace }} get service/{{ include "nodepartition.fullname" . }}-webhook
+
+List generated partition and grouping classes:
+
+  kubectl get deviceclasses -l nodepartition.dra.k8s.io/managed=true
+
+The default TLS mode uses cert-manager and expects the configured
+{{ .Values.controller.webhook.tls.certManager.issuerKind }}
+{{ .Values.controller.webhook.tls.certManager.issuerName }} to already exist.
