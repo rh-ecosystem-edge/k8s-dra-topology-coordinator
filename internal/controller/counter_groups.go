@@ -150,7 +150,9 @@ func selectRepresentative(devices []TopologyDevice) TopologyDevice {
 
 	for _, d := range devices[1:] {
 		total := totalCounterConsumption(d.ConsumesCounters)
-		if total > bestTotal {
+		// Ties resolve to the lexically smaller name so list order never decides.
+		// GroupingBuilder.representative prefers the default-class device first.
+		if total > bestTotal || (total == bestTotal && d.DeviceName < best.DeviceName) {
 			best = d
 			bestTotal = total
 		}
@@ -209,4 +211,75 @@ func selectSmallestPartitions(devices []TopologyDevice) []TopologyDevice {
 		}
 	}
 	return smallest
+}
+
+// PackDevices returns the largest subset of devices that can be allocated at
+// the same time from one counter set. A counter set's capacity is not visible
+// in the topology model, so it is approximated by the highest consumption seen
+// per counter across capacitySource, normally every device of the counter
+// group (the full device on NVIDIA MIG; the single mutex counter on AMD
+// partition-mode sets, where it packs to one device). A nil capacitySource
+// uses devices themselves.
+//
+// shortcut: greedy smallest-first packing, exact for aligned MIG placements but
+// only approximate for arbitrary counter shapes, upgrade if a driver needs it.
+// Capacity is underestimated when the group lacks a device that consumes the
+// physical total, which rejects groupings rather than over-offering them.
+func PackDevices(devices, capacitySource []TopologyDevice) []TopologyDevice {
+	if len(devices) == 0 {
+		return nil
+	}
+	if capacitySource == nil {
+		capacitySource = devices
+	}
+
+	type counterKey struct{ set, counter string }
+	consumption := func(d TopologyDevice) map[counterKey]int64 {
+		m := make(map[counterKey]int64)
+		for _, cc := range d.ConsumesCounters {
+			for name, c := range cc.Counters {
+				m[counterKey{cc.CounterSet, name}] += c.Value.Value()
+			}
+		}
+		return m
+	}
+
+	capacity := make(map[counterKey]int64)
+	for _, d := range capacitySource {
+		for k, v := range consumption(d) {
+			if v > capacity[k] {
+				capacity[k] = v
+			}
+		}
+	}
+
+	sorted := append([]TopologyDevice(nil), devices...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti, tj := totalCounterConsumption(sorted[i].ConsumesCounters), totalCounterConsumption(sorted[j].ConsumesCounters)
+		if ti != tj {
+			return ti < tj
+		}
+		return sorted[i].DeviceName < sorted[j].DeviceName
+	})
+
+	used := make(map[counterKey]int64)
+	var packed []TopologyDevice
+	for _, d := range sorted {
+		c := consumption(d)
+		fits := true
+		for k, v := range c {
+			if used[k]+v > capacity[k] {
+				fits = false
+				break
+			}
+		}
+		if !fits {
+			continue
+		}
+		for k, v := range c {
+			used[k] += v
+		}
+		packed = append(packed, d)
+	}
+	return packed
 }

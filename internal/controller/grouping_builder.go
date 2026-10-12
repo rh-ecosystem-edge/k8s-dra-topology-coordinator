@@ -31,6 +31,8 @@ type GroupingInstance struct {
 
 	// DeviceCounts maps driver name -> count of devices in this instance.
 	DeviceCounts map[string]int
+	// DeviceProfiles maps class -> required device profile, when set.
+	DeviceProfiles map[string]string
 	// DeviceCapacity maps driver name -> capacity for shared devices.
 	DeviceCapacity map[string]map[string]string
 	// Devices lists the topology devices in this instance.
@@ -140,24 +142,149 @@ func (b *GroupingBuilder) evaluateGrouping(
 	return instances
 }
 
-// nodeHasRequiredClasses checks if the node has at least one device
-// of each class required by the grouping, using effective counts
-// to handle overlapping partitionable devices.
+// candidate is a device that can fill a grouping entry, tagged with the
+// counter group it draws from. Two candidates of one group cannot both be
+// allocated unless they are co-allocatable slices.
+type candidate struct {
+	dev   TopologyDevice
+	group string
+}
+
+func counterGroupID(d TopologyDevice) string {
+	if len(d.ConsumesCounters) == 0 {
+		return ""
+	}
+	return d.DriverName + "/" + d.PoolName + "/" + d.ConsumesCounters[0].CounterSet
+}
+
+// representative picks the device that stands for a whole counter group. On a
+// tie in counter consumption (a full-size slice next to the full device) the
+// device in the driver's default class wins, so a slice never replaces the
+// full device.
+func (b *GroupingBuilder) representative(devices []TopologyDevice) TopologyDevice {
+	max := int64(-1)
+	for _, d := range devices {
+		if t := totalCounterConsumption(d.ConsumesCounters); t > max {
+			max = t
+		}
+	}
+	var top, preferred []TopologyDevice
+	for _, d := range devices {
+		if totalCounterConsumption(d.ConsumesCounters) != max {
+			continue
+		}
+		top = append(top, d)
+		if b.rules.GetDeviceClassForDevice(d) == b.rules.GetDeviceClassForDriver(baseDriverName(d.DriverName)) {
+			preferred = append(preferred, d)
+		}
+	}
+	if len(preferred) > 0 {
+		top = preferred
+	}
+	return selectRepresentative(top)
+}
+
+// classCandidates splits devices into per-class candidate lists.
+// Representatives of overlapping counter groups, and devices without counters,
+// land in their own class. Devices that share a counter set with a
+// representative of a different class are co-allocatable slices (for example
+// MIG slices next to a full GPU) and are kept separately so they can be packed.
+func (b *GroupingBuilder) classCandidates(devices []TopologyDevice) (reps map[string][]candidate, slices map[string][]sliceSet) {
+	reps = make(map[string][]candidate)
+	slices = make(map[string][]sliceSet)
+
+	nonOverlapping, groups := GroupOverlappingDevices(devices)
+	for _, d := range nonOverlapping {
+		class := b.rules.GetDeviceClassForDevice(d)
+		reps[class] = append(reps[class], candidate{dev: d})
+	}
+	for _, g := range groups {
+		rep := b.representative(g.Devices)
+		repClass := b.rules.GetDeviceClassForDevice(rep)
+		id := counterGroupID(rep)
+		reps[repClass] = append(reps[repClass], candidate{dev: rep, group: id})
+		bySliceClass := make(map[string][]TopologyDevice)
+		for _, d := range g.Devices {
+			if class := b.rules.GetDeviceClassForDevice(d); class != repClass {
+				bySliceClass[class] = append(bySliceClass[class], d)
+			}
+		}
+		classes := make([]string, 0, len(bySliceClass))
+		for class := range bySliceClass {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		for _, class := range classes {
+			slices[class] = append(slices[class], sliceSet{devices: bySliceClass[class], group: g.Devices, id: id})
+		}
+	}
+	return reps, slices
+}
+
+// sliceSet holds the co-allocatable slices of one counter group together with
+// every device of that group, which supplies the counter capacity for packing.
+type sliceSet struct {
+	devices []TopologyDevice
+	group   []TopologyDevice
+	id      string
+}
+
+func filterByProfile(devices []TopologyDevice, profile string) []TopologyDevice {
+	if profile == "" {
+		return devices
+	}
+	var matched []TopologyDevice
+	for _, d := range devices {
+		if deviceProfile(d) == profile {
+			matched = append(matched, d)
+		}
+	}
+	return matched
+}
+
+// available returns the candidates that can satisfy one grouping device entry:
+// packed slices when the class is a slice class, otherwise representatives.
+func available(gd GroupingDevice, reps map[string][]candidate, slices map[string][]sliceSet) []candidate {
+	sets, isSlice := slices[gd.Class]
+	if !isSlice {
+		var result []candidate
+		for _, c := range reps[gd.Class] {
+			if gd.Profile == "" || deviceProfile(c.dev) == gd.Profile {
+				result = append(result, c)
+			}
+		}
+		return result
+	}
+	var result []candidate
+	for _, set := range sets {
+		for _, d := range PackDevices(filterByProfile(set.devices, gd.Profile), set.group) {
+			result = append(result, candidate{dev: d, group: set.id})
+		}
+	}
+	return result
+}
+
+// deviceProfile returns the device's profile attribute in its own driver's
+// namespace, matching the CEL selector the DeviceClass manager emits.
+func deviceProfile(d TopologyDevice) string {
+	if v, ok := d.ExtendedAttributes[baseDriverName(d.DriverName)+"/profile"]; ok && v.StringValue != nil {
+		return *v.StringValue
+	}
+	return ""
+}
+
+// nodeHasRequiredClasses checks if the node has enough devices for every
+// entry of the grouping, using effective counts for overlapping devices and
+// packed counts for co-allocatable slices.
 func (b *GroupingBuilder) nodeHasRequiredClasses(
 	devices []TopologyDevice,
 	grouping DeviceGrouping,
 ) bool {
-	// Use effective counting to deduplicate overlapping partitions.
-	effectiveCounts := EffectiveDeviceCount(devices)
-
-	classCounts := make(map[string]int)
-	for driver, count := range effectiveCounts {
-		driverClass := b.rules.GetDeviceClassForDriver(driver)
-		classCounts[driverClass] += count
-	}
-
+	reps, slices := b.classCandidates(devices)
 	for _, gd := range grouping.Devices {
-		if classCounts[gd.Class] < gd.Count {
+		if len(available(gd, reps, slices)) < gd.Count {
+			klog.V(1).Infof("Grouping %q: class %q profile %q has fewer than %d usable devices on this node",
+				grouping.Name, gd.Class, gd.Profile, gd.Count)
 			return false
 		}
 	}
@@ -187,49 +314,66 @@ func (b *GroupingBuilder) findInstances(
 	for _, key := range keys {
 		groupDevices := groups[key]
 
-		// Filter to effective devices (deduplicate overlapping partitions)
-		// so that one GPU with SPX/DPX/CPX is counted once, not 11 times.
-		effectiveGroupDevices := FilterToEffectiveDevices(groupDevices)
+		// Overlapping partitions count once (one GPU with SPX/DPX/CPX is one
+		// device); co-allocatable slices are packed per class.
+		reps, slices := b.classCandidates(groupDevices)
 
-		// Count from the filtered device list so classCounts stays consistent
-		// with devicesByClass (both derived from effectiveGroupDevices).
-		classCounts := make(map[string]int)
-		for _, d := range effectiveGroupDevices {
-			driverClass := b.rules.GetDeviceClassForDriver(baseDriverName(d.DriverName))
-			classCounts[driverClass]++
-		}
-
-		// Check how many instances this group can satisfy
-		// (limited by the scarcest required device class)
-		maxInstances := -1
+		pool := make(map[string][]candidate)
 		for _, gd := range grouping.Devices {
-			available := classCounts[gd.Class]
-			possible := available / gd.Count
-			if maxInstances < 0 || possible < maxInstances {
-				maxInstances = possible
+			if k := poolKey(gd); pool[k] == nil {
+				pool[k] = available(gd, reps, slices)
 			}
 		}
 
-		if maxInstances <= 0 {
-			continue
-		}
+		taken := make(map[string]bool)            // devices already placed in an earlier instance
+		committedClass := make(map[string]string) // counter group -> class it serves in earlier instances
 
-		// Index effective devices by class for per-instance allocation
-		devicesByClass := make(map[string][]TopologyDevice)
-		for _, d := range effectiveGroupDevices {
-			driverClass := b.rules.GetDeviceClassForDriver(baseDriverName(d.DriverName))
-			devicesByClass[driverClass] = append(devicesByClass[driverClass], d)
-		}
-
-		consumed := make(map[string]int) // class -> count already allocated
-
-		for i := 0; i < maxInstances; i++ {
+		for {
+			// A counter group serves one class per instance: a full GPU and
+			// its own slices exclude each other.
+			groupClass := make(map[string]string)
+			picked := make(map[string]bool)
 			var instanceDevices []TopologyDevice
+			complete := true
+
 			for _, gd := range grouping.Devices {
-				start := consumed[gd.Class]
-				end := start + gd.Count
-				instanceDevices = append(instanceDevices, devicesByClass[gd.Class][start:end]...)
-				consumed[gd.Class] = end
+				got := 0
+				for _, c := range pool[poolKey(gd)] {
+					if got == gd.Count {
+						break
+					}
+					dk := c.dev.DriverName + "/" + c.dev.DeviceName
+					if taken[dk] || picked[dk] {
+						continue
+					}
+					if c.group != "" {
+						if cls, used := groupClass[c.group]; used && cls != gd.Class {
+							continue
+						}
+						if cls, used := committedClass[c.group]; used && cls != gd.Class {
+							continue
+						}
+					}
+					picked[dk] = true
+					if c.group != "" {
+						groupClass[c.group] = gd.Class
+					}
+					instanceDevices = append(instanceDevices, c.dev)
+					got++
+				}
+				if got < gd.Count {
+					complete = false
+					break
+				}
+			}
+			if !complete {
+				break
+			}
+			for dk := range picked {
+				taken[dk] = true
+			}
+			for id, cls := range groupClass {
+				committedClass[id] = cls
 			}
 
 			inst := b.buildInstance(
@@ -244,6 +388,8 @@ func (b *GroupingBuilder) findInstances(
 
 	return instances
 }
+
+func poolKey(gd GroupingDevice) string { return gd.Class + "|" + gd.Profile }
 
 // groupByAlignment groups devices by the specified topology attribute.
 func (b *GroupingBuilder) groupByAlignment(
@@ -283,6 +429,7 @@ func (b *GroupingBuilder) buildInstance(
 		Alignment:          alignment,
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),
+		DeviceProfiles:     make(map[string]string),
 		Devices:            devices,
 		ExtendedAttributes: make(map[string]DeviceAttributeValue),
 	}
@@ -293,14 +440,16 @@ func (b *GroupingBuilder) buildInstance(
 
 	// Count actual devices by class
 	for _, d := range devices {
-		driverClass := b.rules.GetDeviceClassForDriver(baseDriverName(d.DriverName))
-		inst.DeviceCounts[driverClass]++
+		inst.DeviceCounts[b.rules.GetDeviceClassForDevice(d)]++
 	}
 
 	// Apply capacity from grouping definition for shared devices
 	for _, gd := range grouping.Devices {
 		if len(gd.Capacity) > 0 {
 			inst.DeviceCapacity[gd.Class] = gd.Capacity
+		}
+		if gd.Profile != "" {
+			inst.DeviceProfiles[gd.Class] = gd.Profile
 		}
 	}
 

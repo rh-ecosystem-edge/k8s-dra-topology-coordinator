@@ -17,6 +17,9 @@ type GroupingDevice struct {
 	Class    string            `json:"class"`
 	Count    int               `json:"count"`
 	Capacity map[string]string `json:"capacity,omitempty"`
+	// Profile optionally restricts the grouping to devices whose profile
+	// attribute equals this value (for example a MIG profile "1g.5gb").
+	Profile string `json:"profile,omitempty"`
 }
 
 // DeviceGrouping defines a named combination of devices that should be
@@ -159,6 +162,11 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
+		}
+		for j := 0; j < i; j++ {
+			if devices[j].Class == d.Class && devices[j].Profile != d.Profile {
+				return g, fmt.Errorf("device[%d] repeats class %q with a different profile; one profile per class is supported", i, d.Class)
+			}
 		}
 	}
 

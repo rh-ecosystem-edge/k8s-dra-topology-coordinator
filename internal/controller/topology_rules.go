@@ -91,6 +91,12 @@ type TopologyRule struct {
 	// DeviceClasses (e.g., gpu.nvidia.com publishes "gpu" and "vfio" types
 	// with DeviceClasses "gpu.nvidia.com" and "vfio.gpu.nvidia.com").
 	DeviceClass string
+	// WhenValue makes DeviceClass conditional per device: the override applies
+	// only to devices whose Attribute equals WhenValue (for example
+	// attribute gpu.nvidia.com/type, whenValue mig, deviceClass mig.nvidia.com).
+	// It also marks those devices as co-allocatable slices rather than
+	// exclusive modes of one physical resource.
+	WhenValue string
 	// Description is a human-readable description of the attribute.
 	Description string
 }
@@ -226,11 +232,30 @@ func (s *TopologyRuleStore) GetDeviceClassForDriver(driverName string) string {
 	defer s.mu.RUnlock()
 
 	for _, rule := range s.rules {
-		if rule.Driver == driverName && rule.DeviceClass != "" {
+		if rule.Driver == driverName && rule.DeviceClass != "" && rule.WhenValue == "" {
 			return rule.DeviceClass
 		}
 	}
 	return driverName
+}
+
+// GetDeviceClassForDevice returns the DeviceClass for one device. A rule with
+// whenValue wins when the device's attribute matches; otherwise the
+// driver-level class applies.
+func (s *TopologyRuleStore) GetDeviceClassForDevice(d TopologyDevice) string {
+	driver := baseDriverName(d.DriverName)
+
+	s.mu.RLock()
+	for _, rule := range s.rules {
+		if rule.Driver == driver && rule.DeviceClass != "" && rule.WhenValue != "" &&
+			deviceAttributeValueString(d, rule.Attribute) == rule.WhenValue {
+			s.mu.RUnlock()
+			return rule.DeviceClass
+		}
+	}
+	s.mu.RUnlock()
+
+	return s.GetDeviceClassForDriver(driver)
 }
 
 // BuildNUMACELSelector generates a CEL expression that pins devices from a
@@ -341,6 +366,11 @@ func parseTopologyRule(cm *corev1.ConfigMap) (TopologyRule, error) {
 	rule.FallbackAttribute = cm.Data["fallbackAttribute"]
 
 	rule.DeviceClass = cm.Data["deviceClass"]
+
+	rule.WhenValue = cm.Data["whenValue"]
+	if rule.WhenValue != "" && rule.DeviceClass == "" {
+		return rule, fmt.Errorf("whenValue requires deviceClass")
+	}
 
 	rule.Description = cm.Data["description"]
 
