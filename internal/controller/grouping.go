@@ -63,9 +63,12 @@ type GroupingDevice struct {
 	RequestDriver string            `json:"requestDriver,omitempty"`
 	Count         int               `json:"count"`
 	Capacity      map[string]string `json:"capacity,omitempty"`
-	Passthrough   bool              `json:"passthrough,omitempty"`
-	Selectors     []string          `json:"selectors,omitempty"`
-	Opaque        *OpaqueConfig     `json:"opaque,omitempty"`
+	// Profile optionally restricts the grouping to devices whose profile
+	// attribute equals this value (for example a MIG profile "1g.5gb").
+	Profile     string        `json:"profile,omitempty"`
+	Passthrough bool          `json:"passthrough,omitempty"`
+	Selectors   []string      `json:"selectors,omitempty"`
+	Opaque      *OpaqueConfig `json:"opaque,omitempty"`
 }
 
 // IntentMetadata adds optional human-readable metadata to a device grouping.

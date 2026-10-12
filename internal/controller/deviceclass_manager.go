@@ -1604,6 +1604,11 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			sr.Capacity = cap
 		}
 
+		if profile, ok := inst.DeviceProfiles[driverClass]; ok {
+			sr.Selectors = append(sr.Selectors, fmt.Sprintf(`device.attributes[%q].profile == %q`,
+				m.driverForClass(driverClass), profile))
+		}
+
 		if includeNUMA && len(inst.NUMANodes) > 0 {
 			// The selector is evaluated on the devices requestClass allocates,
 			// so it must use that driver's attribute domain.
@@ -1639,7 +1644,16 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			continue
 		}
 		if rule.Driver != "" {
-			if _, ok := inst.DeviceCounts[m.rules.GetDeviceClassForDriver(rule.Driver)]; !ok {
+			// DeviceCounts is keyed by per-device class, so match the rule's
+			// driver against every class present, not just the driver default.
+			present := false
+			for class := range inst.DeviceCounts {
+				if baseDriverName(m.driverForClass(class)) == rule.Driver {
+					present = true
+					break
+				}
+			}
+			if !present {
 				continue
 			}
 		}
