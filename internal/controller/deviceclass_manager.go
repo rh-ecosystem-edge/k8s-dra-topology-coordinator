@@ -123,10 +123,12 @@ func sortPartitionConfig(config *PartitionConfig) {
 // the smaller partition).
 //
 // A key absent from either side is dropped: a capacity that is not present
-// on every alternative cannot be guaranteed by the aggregate. Values that
-// fail to parse as Kubernetes quantities fall back to the lexically smaller
-// string, which is arbitrary but stable - preferred over propagating
-// iteration-order nondeterminism into the published config.
+// on every alternative cannot be guaranteed by the aggregate. A key whose
+// value fails to parse as a Kubernetes quantity on either side is dropped
+// for the same reason: there is no trustworthy minimum to compare against,
+// and guessing one (e.g. by lexical string order) can silently pick the
+// numerically larger value, which is exactly what this function exists to
+// prevent.
 func mergeMinCapacity(existing, incoming map[string]string) map[string]string {
 	if existing == nil || incoming == nil {
 		return nil
@@ -137,7 +139,11 @@ func mergeMinCapacity(existing, incoming map[string]string) map[string]string {
 		if !ok {
 			continue // not guaranteed across all alternatives
 		}
-		merged[name] = minQuantityString(have, next)
+		min, ok := minQuantityString(have, next)
+		if !ok {
+			continue // unparseable value has no trustworthy minimum
+		}
+		merged[name] = min
 	}
 	if len(merged) == 0 {
 		return nil
@@ -145,22 +151,23 @@ func mergeMinCapacity(existing, incoming map[string]string) map[string]string {
 	return merged
 }
 
-// minQuantityString returns the smaller of two Kubernetes quantity strings,
-// falling back to a stable lexical comparison when either fails to parse.
-func minQuantityString(a, b string) string {
+// minQuantityString returns the smaller of two Kubernetes quantity strings
+// and true, or ("", false) if either fails to parse. Unlike a generic
+// comparator, it deliberately has no fallback for unparseable input: a
+// lexical comparison of quantity strings has no relationship to their
+// numeric value (e.g. "16" sorts before "8"), so guessing would risk
+// silently selecting the larger, unsafe value instead of failing visibly.
+func minQuantityString(a, b string) (string, bool) {
 	qa, errA := resource.ParseQuantity(a)
 	qb, errB := resource.ParseQuantity(b)
 	if errA != nil || errB != nil {
-		klog.V(4).Infof("Capacity value not parseable as a quantity (%q, %q); falling back to lexical comparison", a, b)
-		if b < a {
-			return b
-		}
-		return a
+		klog.V(4).Infof("Capacity value not parseable as a quantity (%q, %q); dropping from aggregate", a, b)
+		return "", false
 	}
 	if qb.Cmp(qa) < 0 {
-		return b
+		return b, true
 	}
-	return a
+	return a, true
 }
 
 // deviceIntersectionState accumulates per-driver device counts, capacity,
@@ -196,19 +203,38 @@ func newDeviceIntersectionState() *deviceIntersectionState {
 func (s *deviceIntersectionState) add(counts map[string]int, capacity map[string]map[string]string, devices []TopologyDevice) {
 	s.total++
 	for driver, count := range counts {
+		// Capture how many times this driver has been added *before* this
+		// call: this, not presence in s.minCap, is what distinguishes "never
+		// seen" from "seen, and its capacity was already dropped because an
+		// earlier instance lacked it." Using map presence for that check was
+		// the bug: once a capacity entry is deleted mid-fold, the next
+		// instance that happens to declare the same capacity looks
+		// indistinguishable from a true first occurrence and silently
+		// resurrects a guarantee that one of the alternatives already broke.
+		seenBefore := s.driverSeen[driver]
 		s.driverSeen[driver]++
 		if prev, has := s.minCounts[driver]; !has || count < prev {
 			s.minCounts[driver] = count
 		}
 		cap, hasCap := capacity[driver]
-		if existing, hasExisting := s.minCap[driver]; hasExisting {
-			if merged := mergeMinCapacity(existing, cap); merged != nil {
+		switch {
+		case seenBefore == 0:
+			// True first occurrence: capacity is only ever guaranteed if
+			// every occurrence declares it, starting here.
+			if hasCap {
+				s.minCap[driver] = cap
+			}
+		case s.minCap[driver] != nil:
+			if merged := mergeMinCapacity(s.minCap[driver], cap); merged != nil {
 				s.minCap[driver] = merged
 			} else {
 				delete(s.minCap, driver)
 			}
-		} else if hasCap {
-			s.minCap[driver] = cap
+		default:
+			// Already permanently dropped by an earlier occurrence (either
+			// the first one lacked capacity, or a later merge found a gap).
+			// Stay dropped - a later occurrence declaring this driver's
+			// capacity again must not resurrect a broken guarantee.
 		}
 	}
 	s.devices = append(s.devices, devices...)

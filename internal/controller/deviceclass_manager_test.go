@@ -1548,10 +1548,16 @@ func TestMergeMinCapacity(t *testing.T) {
 			want:     nil,
 		},
 		{
-			name:     "unparseable values fall back to a stable lexical choice",
+			name:     "unparseable value on either side is dropped, not guessed",
 			existing: map[string]string{"vendor/thing": "zzz"},
 			incoming: map[string]string{"vendor/thing": "aaa"},
-			want:     map[string]string{"vendor/thing": "aaa"},
+			want:     nil,
+		},
+		{
+			name:     "unparseable value would otherwise sort before the larger valid-looking one",
+			existing: map[string]string{"dra.cpu/cpu": "16"},
+			incoming: map[string]string{"dra.cpu/cpu": "not-a-quantity"},
+			want:     nil,
 		},
 	}
 
@@ -1560,4 +1566,63 @@ func TestMergeMinCapacity(t *testing.T) {
 			assert.Equal(t, tt.want, mergeMinCapacity(tt.existing, tt.incoming))
 		})
 	}
+}
+
+func TestDeviceIntersectionState_DroppedCapacityKeyStaysDropped(t *testing.T) {
+	// A capacity key correctly removed because one alternative lacked it
+	// must not reappear just because a later alternative happens to declare
+	// it again. Order matters here precisely because it shouldn't: the
+	// result must be the same regardless of which alternative is "later".
+	s := newDeviceIntersectionState()
+
+	// Instance A: driver X with capacity {k: "10"}.
+	s.add(map[string]int{"X": 1}, map[string]map[string]string{"X": {"k": "10"}}, nil)
+
+	// Instance B: driver X present, but no capacity declared for it at all.
+	s.add(map[string]int{"X": 1}, map[string]map[string]string{}, nil)
+
+	_, cap := s.intersect(nil)
+	require.NotContains(t, cap, "X", "capacity for X must already be dropped after instance B lacks it")
+
+	// Instance C: driver X present again, with capacity {k: "5"}.
+	s.add(map[string]int{"X": 1}, map[string]map[string]string{"X": {"k": "5"}}, nil)
+
+	counts, cap := s.intersect(nil)
+	assert.Equal(t, 1, counts["X"], "driver count is unaffected by the capacity gap")
+	assert.NotContains(t, cap, "X",
+		"capacity for X must stay dropped: instance B had none, so it is not guaranteed across every alternative")
+}
+
+func TestDeviceIntersectionState_DroppedCapacityKeyOrderIndependent(t *testing.T) {
+	// Same scenario as above, but the gap is in the middle, confirming the
+	// result doesn't depend on which position lacks the capacity.
+	orders := [][]map[string]string{
+		{{"k": "10"}, {}, {"k": "5"}}, // gap in the middle
+		{{}, {"k": "10"}, {"k": "5"}}, // gap first
+		{{"k": "10"}, {"k": "5"}, {}}, // gap last
+	}
+	for i, order := range orders {
+		s := newDeviceIntersectionState()
+		for _, cap := range order {
+			capacity := map[string]map[string]string{}
+			if len(cap) > 0 {
+				capacity["X"] = cap
+			}
+			s.add(map[string]int{"X": 1}, capacity, nil)
+		}
+		_, cap := s.intersect(nil)
+		assert.NotContains(t, cap, "X", "order %d: a gap anywhere in the fold must drop the key", i)
+	}
+}
+
+func TestDeviceIntersectionState_UnparseableCapacityDropped(t *testing.T) {
+	// An unparseable capacity value must drop the key, not fall back to a
+	// lexical "minimum" that has no relationship to the actual quantity.
+	s := newDeviceIntersectionState()
+	s.add(map[string]int{"X": 1}, map[string]map[string]string{"X": {"k": "16"}}, nil)
+	s.add(map[string]int{"X": 1}, map[string]map[string]string{"X": {"k": "not-a-quantity"}}, nil)
+
+	counts, cap := s.intersect(nil)
+	assert.Equal(t, 1, counts["X"], "driver count is unaffected by an unparseable capacity value")
+	assert.NotContains(t, cap, "X", "an unparseable capacity value must not produce a fabricated minimum")
 }
