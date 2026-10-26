@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/controller"
 )
@@ -251,6 +253,101 @@ func TestPartitionClaimIsExpanded(t *testing.T) {
 	}
 }
 
+func TestContainerOfferingDoesNotInjectVFIO(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModeContainer,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "rdma.mellanox.com", Count: 1},
+		},
+	}
+	client := fake.NewSimpleClientset(makePartitionDeviceClass("container-rdma", partConfig))
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "container-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "container-rdma", Count: 1},
+		}}}},
+	}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	require.True(t, resp.Response.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Response.Patch, &patches))
+	for _, patch := range patches {
+		assert.NotEqual(t, "/spec/devices/config", patch.Path, "container offering must not inject VFIO")
+	}
+}
+
+func TestPassthroughOfferingInjectsVFIO(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "rdma.mellanox.com", Count: 1, Passthrough: true},
+		},
+	}
+	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-rdma", partConfig))
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "vfio-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-rdma", Count: 1},
+		}}}},
+	}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	require.True(t, resp.Response.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Response.Patch, &patches))
+	foundConfig := false
+	for _, patch := range patches {
+		if patch.Path == "/spec/devices/config" {
+			foundConfig = true
+		}
+	}
+	assert.True(t, foundConfig)
+}
+
+func TestPassthroughCountSplitsRequests(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "gpu.amd.com", Count: 2, Passthrough: true},
+		},
+	}
+	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-gpu", partConfig))
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "vfio-count-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-gpu", Count: 1},
+		}}}},
+	}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	var requestsPatch *jsonPatch
+	for i := range patches {
+		if patches[i].Path == "/spec/devices/requests" {
+			requestsPatch = &patches[i]
+		}
+	}
+	require.NotNil(t, requestsPatch)
+	data, err := json.Marshal(requestsPatch.Value)
+	require.NoError(t, err)
+	var requests []resourcev1.DeviceRequest
+	require.NoError(t, json.Unmarshal(data, &requests))
+	require.Len(t, requests, 2)
+	assert.Equal(t, int64(1), requests[0].Exactly.Count)
+	assert.Equal(t, int64(1), requests[1].Exactly.Count)
+	assert.NotEqual(t, requests[0].Name, requests[1].Name)
+}
+
 func TestMixedClaimOnlyExpandsPartition(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
@@ -370,6 +467,45 @@ func TestDeviceClassNotFoundReturnsAllow(t *testing.T) {
 	assert.True(t, resp.Response.Allowed)
 	assert.Nil(t, resp.Response.PatchType, "missing DeviceClass should not cause mutation")
 	assert.Empty(t, resp.Response.Patch)
+}
+
+func TestManagedDeviceClassWithoutPartitionConfigIsRejected(t *testing.T) {
+	dc := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "managed-without-config",
+			Labels: map[string]string{controller.CoordinatorDriverName + "/managed": "true"},
+		},
+	}
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+		}}}},
+	}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
+}
+
+func TestDeviceClassLookupErrorIsRejected(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "deviceclasses", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("apiserver unavailable")
+	})
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup-error-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "coordinator-offering", Count: 1},
+		}}}},
+	}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
 }
 
 func TestInvalidPartitionConfigReturnsAllow(t *testing.T) {
@@ -1098,9 +1234,10 @@ func TestHandleVMIAdmission_NoTemplates(t *testing.T) {
 func TestHandleVMIAdmission_GeneratesHostDevices(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
 		SubResources: []controller.SubResourceConfig{
-			{DeviceClass: "gpu.amd.com", Count: 1},
-			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1},
+			{DeviceClass: "gpu.amd.com", Count: 1, Passthrough: true},
+			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1, Passthrough: true},
 			{DeviceClass: "dra.cpu", Count: 1},
 		},
 	}

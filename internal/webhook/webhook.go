@@ -5,6 +5,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,6 +43,13 @@ type jsonPatch struct {
 	Path  string      `json:"path"`
 	Value interface{} `json:"value,omitempty"`
 }
+
+type managedExpansionError struct {
+	err error
+}
+
+func (e *managedExpansionError) Error() string { return e.err.Error() }
+func (e *managedExpansionError) Unwrap() error { return e.err }
 
 // NewClaimExpander creates a new ClaimExpander webhook handler.
 // The model parameter is optional; when provided, it enables satisfiability
@@ -138,6 +147,10 @@ func (ce *ClaimExpander) handleAdmission(ctx context.Context, req *admissionv1.A
 	patches, err := ce.expandClaim(ctx, &claim)
 	if err != nil {
 		klog.Errorf("Failed to expand claim %s/%s: %v", claim.Namespace, claim.Name, err)
+		var managedErr *managedExpansionError
+		if errors.As(err, &managedErr) {
+			return denyResponse(err.Error())
+		}
 		return allowResponse()
 	}
 
@@ -171,6 +184,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	var constraints []resourcev1.DeviceConstraint
 	anyExpanded := false
 	expansionMap := make(map[string][]string) // original request name → expanded request names
+	passthroughDrivers := make(map[string]bool)
 
 	for _, req := range requests {
 		if req.Exactly == nil {
@@ -178,9 +192,12 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			continue
 		}
 
-		partitionConfig, err := ce.getPartitionConfig(ctx, req.Exactly.DeviceClassName)
+		partitionConfig, managed, err := ce.lookupPartitionConfig(ctx, req.Exactly.DeviceClassName)
 		if err != nil {
 			klog.Warningf("Failed to get partition config for DeviceClass %q: %v", req.Exactly.DeviceClassName, err)
+			if managed {
+				return nil, err
+			}
 			expandedRequests = append(expandedRequests, req)
 			continue
 		}
@@ -188,6 +205,13 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 		if partitionConfig == nil {
 			expandedRequests = append(expandedRequests, req)
 			continue
+		}
+		if partitionConfig.Mode == controller.OfferingModePassthrough {
+			for _, sr := range partitionConfig.SubResources {
+				if sr.Passthrough {
+					passthroughDrivers[sr.DeviceClass] = true
+				}
+			}
 		}
 
 		// Expand this request into sub-resource requests
@@ -247,11 +271,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 		}
 	}
 	var vfioConfigs []resourcev1.DeviceClaimConfiguration
-	for _, sr := range expandedRequests {
-		if sr.Exactly == nil {
-			continue
-		}
-		driver := sr.Exactly.DeviceClassName
+	for driver := range passthroughDrivers {
 		if existingConfigDrivers[driver] {
 			continue
 		}
@@ -517,10 +537,21 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 // getPartitionConfig looks up a DeviceClass and extracts the PartitionConfig
 // from its opaque configuration if present.
 func (ce *ClaimExpander) getPartitionConfig(ctx context.Context, deviceClassName string) (*controller.PartitionConfig, error) {
+	config, _, err := ce.lookupPartitionConfig(ctx, deviceClassName)
+	return config, err
+}
+
+func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassName string) (*controller.PartitionConfig, bool, error) {
 	dc, err := ce.client.ResourceV1().DeviceClasses().Get(ctx, deviceClassName, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get DeviceClass %q: %w", deviceClassName, err)
+		if apierrors.IsNotFound(err) {
+			// A missing class is left to the normal DRA validation path. This
+			// preserves pass-through behavior for native claims.
+			return nil, false, nil
+		}
+		return nil, true, &managedExpansionError{err: fmt.Errorf("failed to get DeviceClass %q: %w", deviceClassName, err)}
 	}
+	managed := dc.Labels[driverName+"/managed"] == "true"
 
 	for _, cfg := range dc.Spec.Config {
 		if cfg.Opaque == nil {
@@ -533,17 +564,26 @@ func (ce *ClaimExpander) getPartitionConfig(ctx context.Context, deviceClassName
 		var partConfig controller.PartitionConfig
 		if err := json.Unmarshal(cfg.Opaque.Parameters.Raw, &partConfig); err != nil {
 			klog.Warningf("Failed to unmarshal opaque config for DeviceClass %q: %v", deviceClassName, err)
+			if managed {
+				return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has invalid PartitionConfig: %w", deviceClassName, err)}
+			}
 			continue
 		}
 
 		if partConfig.Kind != "PartitionConfig" {
+			if managed {
+				return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q does not contain a PartitionConfig", deviceClassName)}
+			}
 			continue
 		}
 
-		return &partConfig, nil
+		return &partConfig, managed, nil
 	}
 
-	return nil, nil
+	if managed {
+		return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has no PartitionConfig", deviceClassName)}
+	}
+	return nil, false, nil
 }
 
 // sanitizeDeviceClassName converts a device class name into a DNS-label-safe suffix.
@@ -757,21 +797,24 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 				count = tplReq.Exactly.Count
 			}
 
-			// Identify passthrough device classes (GPU, NIC — not CPU/memory).
+			// Use the explicit offering metadata to identify VM passthrough devices.
 			var passthroughDevices []struct {
 				class    string
 				nameHint string
 				srCount  int
 			}
-			for _, sr := range config.SubResources {
-				lc := strings.ToLower(sr.DeviceClass)
-				hint := ""
-				if strings.Contains(lc, "gpu") || strings.Contains(lc, "nvidia") {
-					hint = "gpu"
-				} else if strings.Contains(lc, "net") || strings.Contains(lc, "sriov") || strings.Contains(lc, "rdma") {
-					hint = "nic"
-				}
-				if hint != "" {
+			if config.Mode == controller.OfferingModePassthrough {
+				for _, sr := range config.SubResources {
+					if !sr.Passthrough {
+						continue
+					}
+					hint := "device"
+					lc := strings.ToLower(sr.DeviceClass)
+					if strings.Contains(lc, "gpu") {
+						hint = "gpu"
+					} else if strings.Contains(lc, "net") || strings.Contains(lc, "sriov") || strings.Contains(lc, "rdma") {
+						hint = "nic"
+					}
 					passthroughDevices = append(passthroughDevices, struct {
 						class    string
 						nameHint string
@@ -1024,5 +1067,12 @@ func (ce *ClaimExpander) buildVfioConfig(driver string) *resourcev1.DeviceClaimC
 func allowResponse() *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
+	}
+}
+
+func denyResponse(message string) *admissionv1.AdmissionResponse {
+	return &admissionv1.AdmissionResponse{
+		Allowed: false,
+		Result:  &metav1.Status{Message: message},
 	}
 }
