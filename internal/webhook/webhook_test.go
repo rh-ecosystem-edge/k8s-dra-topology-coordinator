@@ -1197,6 +1197,55 @@ func TestHandlePodAdmission_RewritesClaimReferences(t *testing.T) {
 	}
 }
 
+func TestHandlePodAdmission_RewritesTemplateClaimReferences(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind:         "PartitionConfig",
+		Mode:         controller.OfferingModeContainer,
+		SubResources: []controller.SubResourceConfig{{DeviceClass: "gpu.amd.com", Count: 1}},
+	}
+	partClass := makePartitionDeviceClass("template-partition", partConfig)
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-partition-tpl", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name:    "partition",
+				Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "template-partition", Count: 1},
+			}}},
+		}},
+	}
+	client := fake.NewSimpleClientset(partClass, template)
+	expander := NewClaimExpander(client)
+	templateName := "template-partition-tpl"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			ResourceClaims: []corev1.PodResourceClaim{{
+				Name:                      "partition-claim",
+				ResourceClaimTemplateName: &templateName,
+			}},
+			Containers: []corev1.Container{{
+				Name:      "main",
+				Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "partition-claim", Request: "partition"}}},
+			}},
+		},
+	}
+	podJSON, err := json.Marshal(pod)
+	require.NoError(t, err)
+	resp := expander.handlePodAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "template-pod-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: podJSON},
+	})
+	require.True(t, resp.Allowed)
+	require.NotNil(t, resp.PatchType)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
+	assert.NotEmpty(t, patches)
+	assert.Contains(t, string(resp.Patch), "partition-gpu-amd-com")
+}
+
 func TestHandleVMIAdmission_NoTemplates(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	expander := NewClaimExpander(client)
@@ -1320,6 +1369,75 @@ func TestHandleVMIAdmission_GeneratesHostDevices(t *testing.T) {
 		}
 		assert.True(t, hasHostDevicePatch, "should generate hostDevices patches for passthrough devices")
 	}
+}
+
+func TestHandleVMIAdmission_UsesUniqueRequestsForPassthroughCount(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "gpu.amd.com", Count: 2, Passthrough: true},
+		},
+	}
+	partClass := makePartitionDeviceClass("vfio-count", partConfig)
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "vfio-count-tpl", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name:    "partition",
+				Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-count", Count: 1},
+			}}},
+		}},
+	}
+	client := fake.NewSimpleClientset(partClass, claimTemplate)
+	expander := NewClaimExpander(client)
+	vmi := map[string]interface{}{
+		"apiVersion": "kubevirt.io/v1",
+		"kind":       "VirtualMachineInstance",
+		"metadata":   map[string]interface{}{"name": "count-vmi", "namespace": "default"},
+		"spec": map[string]interface{}{
+			"resourceClaims": []interface{}{map[string]interface{}{
+				"name": "partition", "resourceClaimTemplateName": "vfio-count-tpl",
+			}},
+			"domain": map[string]interface{}{"devices": map[string]interface{}{}},
+		},
+	}
+	vmiJSON, err := json.Marshal(vmi)
+	require.NoError(t, err)
+	resp := expander.handleVMIAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "count-vmi-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: vmiJSON},
+	})
+	require.True(t, resp.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
+	var requestNames []string
+	for _, patch := range patches {
+		if !strings.Contains(patch.Path, "hostDevices") {
+			continue
+		}
+		if devices, ok := patch.Value.([]interface{}); ok {
+			for _, device := range devices {
+				if value, ok := device.(map[string]interface{}); ok {
+					if name, ok := value["requestName"].(string); ok {
+						requestNames = append(requestNames, name)
+					}
+				}
+			}
+			continue
+		}
+		value, ok := patch.Value.(map[string]interface{})
+		if ok {
+			if name, ok := value["requestName"].(string); ok {
+				requestNames = append(requestNames, name)
+			}
+		}
+	}
+	require.Len(t, requestNames, 2)
+	assert.NotEqual(t, requestNames[0], requestNames[1])
 }
 
 func TestEscapeJSONPointer(t *testing.T) {

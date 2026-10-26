@@ -374,6 +374,10 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 
 		splitCount := 1
 		deviceCount := sr.Count
+		if config.Mode == controller.OfferingModePassthrough && sr.Passthrough && len(sr.Capacity) == 0 && sr.Count > 1 {
+			splitCount = sr.Count
+			deviceCount = 1
+		}
 
 		for si := 0; si < splitCount; si++ {
 			var name string
@@ -628,40 +632,42 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 	claimExpansions := make(map[string]*claimExpansion) // pod claim name → expansion
 
 	for _, prc := range pod.Spec.ResourceClaims {
-		// Resolve the claim name — direct reference or template-generated.
-		// Template-generated claims use a naming convention: <pod-name>-<template-name>.
-		// During CREATE admission the pod may not have a name yet (generateName),
-		// so we try direct lookup first.
-		var claimToLookup string
 		if prc.ResourceClaimName != nil && *prc.ResourceClaimName != "" {
-			claimToLookup = *prc.ResourceClaimName
-		} else if prc.ResourceClaimTemplateName != nil && *prc.ResourceClaimTemplateName != "" {
-			// For template claims, the ResourceClaim is created by the scheduler
-			// with name <pod-name>-<claim-name>. Try looking up the template claim.
-			claimToLookup = *prc.ResourceClaimTemplateName
-		}
-		if claimToLookup == "" {
+			claimName := *prc.ResourceClaimName
+			claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimName, metav1.GetOptions{})
+			if err != nil {
+				klog.V(4).Infof("Could not look up claim %s/%s for pod rewriting: %v", req.Namespace, claimName, err)
+				continue
+			}
+			annotation := claim.Annotations[driverName+"/expanded-requests"]
+			if annotation == "" {
+				continue
+			}
+			var mapping map[string][]string
+			if err := json.Unmarshal([]byte(annotation), &mapping); err != nil {
+				klog.Warningf("Failed to parse expansion annotation on claim %s: %v", claimName, err)
+				continue
+			}
+			claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
 			continue
 		}
 
-		claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimToLookup, metav1.GetOptions{})
-		if err != nil {
-			klog.V(4).Infof("Could not look up claim %s/%s for pod rewriting: %v", req.Namespace, claimToLookup, err)
-			continue
+		if prc.ResourceClaimTemplateName != nil && *prc.ResourceClaimTemplateName != "" {
+			templateName := *prc.ResourceClaimTemplateName
+			template, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
+			if err != nil {
+				klog.V(4).Infof("Could not look up claim template %s/%s for pod rewriting: %v", req.Namespace, templateName, err)
+				continue
+			}
+			mapping, err := ce.expansionMapping(ctx, template.Spec.Spec.Devices.Requests)
+			if err != nil {
+				klog.Warningf("Failed to expand claim template %s: %v", templateName, err)
+				continue
+			}
+			if len(mapping) > 0 {
+				claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
+			}
 		}
-
-		annotation := claim.Annotations[driverName+"/expanded-requests"]
-		if annotation == "" {
-			continue
-		}
-
-		var mapping map[string][]string
-		if err := json.Unmarshal([]byte(annotation), &mapping); err != nil {
-			klog.Warningf("Failed to parse expansion annotation on claim %s: %v", claimToLookup, err)
-			continue
-		}
-
-		claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
 	}
 
 	if len(claimExpansions) == 0 {
@@ -730,6 +736,27 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 		PatchType: &patchType,
 		Patch:     patchBytes,
 	}
+}
+
+func (ce *ClaimExpander) expansionMapping(ctx context.Context, requests []resourcev1.DeviceRequest) (map[string][]string, error) {
+	mapping := make(map[string][]string)
+	for _, req := range requests {
+		if req.Exactly == nil {
+			continue
+		}
+		config, err := ce.getPartitionConfig(ctx, req.Exactly.DeviceClassName)
+		if err != nil {
+			return nil, err
+		}
+		if config == nil {
+			continue
+		}
+		subRequests, _ := ce.expandRequest(req, config)
+		for _, subRequest := range subRequests {
+			mapping[req.Name] = append(mapping[req.Name], subRequest.Name)
+		}
+	}
+	return mapping, nil
 }
 
 // handleVMIAdmission auto-generates hostDevices for KubeVirt VMIs that
@@ -840,6 +867,9 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 							prefix = fmt.Sprintf("%s-%d", tplReq.Name, i)
 						}
 						requestName = fmt.Sprintf("%s-%s", prefix, sanitized)
+						if pd.srCount > 1 {
+							requestName = fmt.Sprintf("%s-%s-%d", prefix, sanitized, si)
+						}
 
 						deviceName := fmt.Sprintf("%s%d", pd.nameHint, globalDevIdx)
 						globalDevIdx++
@@ -869,9 +899,13 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 				}
 			}
 
+			generatedHostDevices := 0
+			for _, pd := range passthroughDevices {
+				generatedHostDevices += pd.srCount
+			}
 			vmiName, _ := vmi["metadata"].(map[string]interface{})["name"].(string)
 			klog.Infof("Auto-generated %d hostDevices for VMI %s/%s from template %s (count=%d)",
-				int(count)*len(passthroughDevices), req.Namespace, vmiName, templateName, count)
+				int(count)*generatedHostDevices, req.Namespace, vmiName, templateName, count)
 		}
 	}
 
