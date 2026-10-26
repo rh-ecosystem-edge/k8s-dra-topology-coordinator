@@ -24,10 +24,10 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	klog "k8s.io/klog/v2"
 
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/controller"
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/health"
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/metrics"
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/webhook"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/health"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/metrics"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/webhook"
 )
 
 const (
@@ -121,8 +121,16 @@ func runController(_ *cobra.Command, _ []string) error {
 	klog.Infof("Health check server started on port %d", healthCheckPort)
 
 	ctrl := controller.NewController(clientset, driverName, controller.PartitionMode(partitionMode))
+	if err := ctrl.StartCache(ctx); err != nil {
+		return fmt.Errorf("failed to start controller cache: %v", err)
+	}
+	go func() {
+		if err := ctrl.RunWorker(ctx); err != nil && ctx.Err() == nil {
+			klog.Errorf("Controller worker failed: %v", err)
+		}
+	}()
 
-	// Start webhook server (runs on all replicas, not just the leader)
+	// Start webhook server after this replica has a synchronized topology model.
 	webhookServer, err := startWebhookServer(ctx, clientset, ctrl.Model())
 	if err != nil {
 		return fmt.Errorf("failed to start webhook server: %v", err)
@@ -157,13 +165,12 @@ func runController(_ *cobra.Command, _ []string) error {
 		ReleaseOnCancel: true,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				klog.Info("Acquired leader election, starting controller")
-				if err := ctrl.Run(ctx); err != nil && err != context.Canceled {
-					klog.Errorf("Controller failed: %v", err)
-				}
+				klog.Info("Acquired leader election, enabling DeviceClass publication")
+				ctrl.SetPublishing(true)
 			},
 			OnStoppedLeading: func() {
 				klog.Info("Lost leader election")
+				ctrl.SetPublishing(false)
 			},
 			OnNewLeader: func(newLeader string) {
 				if newLeader != identity {
