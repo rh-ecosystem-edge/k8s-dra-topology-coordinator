@@ -1105,6 +1105,50 @@ func TestDeviceClassManager_GroupingConfigIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestDeviceClassManager_GroupingConfigCarriesPassthroughMode(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	rules := NewTopologyRuleStore()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, rules)
+
+	inst := multiDeviceGroupingInstance(0)
+	inst.Mode = OfferingModePassthrough
+	inst.PassthroughClasses = map[string]bool{
+		"gpu.nvidia.com":    true,
+		"rdma.mellanox.com": true,
+	}
+
+	config := manager.buildGroupingConfig(inst)
+	assert.Equal(t, OfferingModePassthrough, config.Mode)
+	for _, sr := range config.SubResources {
+		assert.Equal(t, inst.PassthroughClasses[sr.DeviceClass], sr.Passthrough, sr.DeviceClass)
+	}
+}
+
+func TestDeviceClassManager_GroupingAggregateCarriesPassthroughMode(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	instance := multiDeviceGroupingInstance(0)
+	instance.Mode = OfferingModePassthrough
+	instance.PassthroughClasses = map[string]bool{
+		"gpu.nvidia.com":    true,
+		"rdma.mellanox.com": true,
+	}
+
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
+		NodeName:  "node-1",
+		Instances: []GroupingInstance{instance},
+	}}))
+
+	dc, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair", metav1.GetOptions{})
+	require.NoError(t, err)
+	var config PartitionConfig
+	require.NoError(t, json.Unmarshal(dc.Spec.Config[0].Opaque.Parameters.Raw, &config))
+	assert.Equal(t, OfferingModePassthrough, config.Mode)
+	for _, sr := range config.SubResources {
+		assert.Equal(t, instance.PassthroughClasses[sr.DeviceClass], sr.Passthrough, sr.DeviceClass)
+	}
+}
+
 func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIsDeterministic(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	rules := NewTopologyRuleStore()

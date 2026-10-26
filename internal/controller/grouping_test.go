@@ -126,6 +126,26 @@ func TestParseDeviceGrouping_IntentMetadata(t *testing.T) {
 	})
 }
 
+func TestParseDeviceGrouping_PassthroughOffering(t *testing.T) {
+	data := validGroupingData("gpu-vfio")
+	data["mode"] = "passthrough"
+	data["devices"] = "- class: gpu.example.com\n  count: 2\n  passthrough: true"
+
+	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+	require.NoError(t, err)
+	assert.Equal(t, OfferingModePassthrough, grouping.Mode)
+	require.Len(t, grouping.Devices, 1)
+	assert.True(t, grouping.Devices[0].Passthrough)
+}
+
+func TestParseDeviceGrouping_InvalidMode(t *testing.T) {
+	data := validGroupingData("test")
+	data["mode"] = "vm"
+
+	err := NewGroupingStore().LoadFromConfigMap(makeGroupingConfigMap("test", data))
+	assert.ErrorContains(t, err, "invalid mode")
+}
+
 func TestParseDeviceGrouping_InvalidIntentMetadata(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -18,6 +18,8 @@ type GroupingInstance struct {
 	NodeName string
 	// GroupingName is the admin-defined grouping name.
 	GroupingName string
+	// Mode is the intended consumer mode for this offering.
+	Mode OfferingMode
 	// Intent contains optional discovery metadata from the source grouping.
 	Intent IntentMetadata
 	// Alignment is the topology attribute this instance matched on
@@ -35,6 +37,8 @@ type GroupingInstance struct {
 	DeviceCounts map[string]int
 	// DeviceCapacity maps driver name -> capacity for shared devices.
 	DeviceCapacity map[string]map[string]string
+	// PassthroughClasses marks device classes explicitly selected for VM passthrough.
+	PassthroughClasses map[string]bool
 	// Devices lists the topology devices in this instance.
 	Devices []TopologyDevice
 
@@ -282,10 +286,12 @@ func (b *GroupingBuilder) buildInstance(
 		Name:               name,
 		NodeName:           nodeName,
 		GroupingName:       grouping.Name,
+		Mode:               grouping.Mode,
 		Intent:             grouping.Intent,
 		Alignment:          alignment,
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),
+		PassthroughClasses: make(map[string]bool),
 		Devices:            devices,
 		ExtendedAttributes: make(map[string]DeviceAttributeValue),
 	}
@@ -302,6 +308,9 @@ func (b *GroupingBuilder) buildInstance(
 
 	// Apply capacity from grouping definition for shared devices
 	for _, gd := range grouping.Devices {
+		if gd.Passthrough {
+			inst.PassthroughClasses[gd.Class] = true
+		}
 		if len(gd.Capacity) > 0 {
 			inst.DeviceCapacity[gd.Class] = gd.Capacity
 		}
