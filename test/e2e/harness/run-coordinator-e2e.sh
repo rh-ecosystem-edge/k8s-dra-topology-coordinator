@@ -227,6 +227,7 @@ helm_args=(
   upgrade --install "$RELEASE" "$CHART_DIR"
   --namespace "$COORDINATOR_NAMESPACE"
   --create-namespace
+  --set-string "fullnameOverride=$RELEASE"
   --set-string "driverName=$DRIVER_NAME"
   --set-string "partitionMode=$PARTITION_MODE"
   --set-string "controller.leaderElection.id=$LEASE_ID"
