@@ -71,7 +71,7 @@ func init() {
 	rootCmd.Flags().StringVar(&kubecfg, "kubeconfig", "",
 		"Path to kubeconfig file (optional, uses in-cluster config if not specified)")
 	rootCmd.Flags().StringVar(&driverName, "driver-name", "nodepartition.dra.k8s.io",
-		"Coordinator identifier for DeviceClass labels and opaque config")
+		"DRA driver name used in generated DeviceClass selectors and opaque config")
 	rootCmd.Flags().StringVar(&partitionMode, "partition-mode", "auto",
 		`Partition strategy: "auto" (groupings if ConfigMaps exist, else fixed partitions), `+
 			`"partitions" (always fixed hierarchy), or "groupings" (always admin-defined groupings)`)
@@ -131,7 +131,7 @@ func runController(_ *cobra.Command, _ []string) error {
 	}()
 
 	// Start webhook server after this replica has a synchronized topology model.
-	webhookServer, err := startWebhookServer(ctx, clientset, ctrl.Model())
+	webhookServer, err := startWebhookServer(ctx, clientset, driverName, ctrl.Model())
 	if err != nil {
 		return fmt.Errorf("failed to start webhook server: %v", err)
 	}
@@ -197,8 +197,8 @@ func runController(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func startWebhookServer(_ context.Context, clientset kubernetes.Interface, model *controller.TopologyModel) (*http.Server, error) { //nolint:unparam // error return reserved for TLS validation
-	expander := webhook.NewClaimExpander(clientset, model)
+func startWebhookServer(_ context.Context, clientset kubernetes.Interface, configuredDriverName string, model *controller.TopologyModel) (*http.Server, error) { //nolint:unparam // error return reserved for TLS validation
+	expander := webhook.NewClaimExpanderWithDriver(clientset, configuredDriverName, model)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mutate", expander.Handler())
