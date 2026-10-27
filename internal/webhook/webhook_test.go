@@ -1094,6 +1094,8 @@ func TestSanitizeForRequestName(t *testing.T) {
 		{"dra.cpu", "dra-cpu"},
 		{"simple", "simple"},
 		{"UPPER/Case", "upper-case"},
+		{"a..b", "a-b"},
+		{"", "sub"},
 	}
 
 	for _, tt := range tests {
@@ -1102,6 +1104,67 @@ func TestSanitizeForRequestName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestHandleVMIAdmission_RewritesDistinctHostDeviceRequests(t *testing.T) {
+	claimName := "expanded-claim"
+	mapping, err := json.Marshal(map[string][]string{
+		"partition": {
+			"partition-rdma-mellanox-com-0",
+			"partition-rdma-mellanox-com-1",
+		},
+	})
+	require.NoError(t, err)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			Annotations: map[string]string{
+				driverName + "/expanded-requests": string(mapping),
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(claim)
+	expander := NewClaimExpander(client)
+	vmi := map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "mapped-vmi"},
+		"spec": map[string]interface{}{
+			"resourceClaims": []interface{}{map[string]interface{}{
+				"name": "partition-claim", "resourceClaimName": claimName,
+			}},
+			"domain": map[string]interface{}{
+				"devices": map[string]interface{}{
+					"hostDevices": []interface{}{
+						map[string]interface{}{"name": "nic0", "claimName": "partition-claim", "requestName": "partition"},
+						map[string]interface{}{"name": "nic1", "claimName": "partition-claim", "requestName": "partition"},
+					},
+				},
+			},
+		},
+	}
+	vmiJSON, err := json.Marshal(vmi)
+	require.NoError(t, err)
+	resp := expander.handleVMIAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "mapped-vmi-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: vmiJSON},
+	})
+	require.True(t, resp.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
+	var requestNames []string
+	for _, patch := range patches {
+		if strings.Contains(patch.Path, "hostDevices/") && strings.HasSuffix(patch.Path, "/requestName") {
+			requestNames = append(requestNames, patch.Value.(string))
+		}
+	}
+	require.Len(t, requestNames, 2)
+	assert.ElementsMatch(t, []string{
+		"partition-rdma-mellanox-com-0",
+		"partition-rdma-mellanox-com-1",
+	}, requestNames)
 }
 
 func TestHandlePodAdmission_NoClaimsPassesThrough(t *testing.T) {
@@ -1244,6 +1307,44 @@ func TestHandlePodAdmission_RewritesTemplateClaimReferences(t *testing.T) {
 	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
 	assert.NotEmpty(t, patches)
 	assert.Contains(t, string(resp.Patch), "partition-gpu-amd-com")
+}
+
+func TestHandlePodAdmission_RejectsManagedTemplateLookupError(t *testing.T) {
+	templateName := "managed-template"
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name:    "partition",
+				Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "managed-offering", Count: 1},
+			}}},
+		}},
+	}
+	client := fake.NewSimpleClientset(template)
+	client.PrependReactor("get", "deviceclasses", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("apiserver unavailable")
+	})
+	expander := NewClaimExpander(client)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			ResourceClaims: []corev1.PodResourceClaim{{Name: "partition-claim", ResourceClaimTemplateName: &templateName}},
+			Containers: []corev1.Container{{
+				Name:      "main",
+				Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "partition-claim", Request: "partition"}}},
+			}},
+		},
+	}
+	podJSON, err := json.Marshal(pod)
+	require.NoError(t, err)
+	resp := expander.handlePodAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "managed-pod-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: podJSON},
+	})
+	assert.False(t, resp.Allowed)
 }
 
 func TestHandleVMIAdmission_NoTemplates(t *testing.T) {
