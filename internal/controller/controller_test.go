@@ -79,6 +79,66 @@ func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+func TestController_TopologyRuleEventsRefreshModelWithoutReconcile(t *testing.T) {
+	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModePartitions)
+	ctrl.synced = true
+	customNUMA := int64(3)
+	ctrl.model.UpdateFromResourceSlice(makeResourceSlice("custom-slice", "mock-device.example.com", "node-1", "pool", []resourcev1.Device{{
+		Name: "device-0",
+		Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+			"mock-device.example.com/numa": {IntValue: &customNUMA},
+		},
+	}}))
+
+	rule := makeTopologyRuleConfigMap("custom-rule", "default", map[string]string{
+		"attribute": "mock-device.example.com/numa",
+		"type":      "int",
+		"driver":    "mock-device.example.com",
+		"mapsTo":    "numaNode",
+	})
+	ctrl.onConfigMapAdd(rule)
+
+	require.Len(t, ctrl.model.GetRules(), 1)
+	topology := ctrl.model.GetNodeTopology("node-1")
+	require.NotNil(t, topology)
+	require.Len(t, topology.AllDevices(), 1)
+	require.NotNil(t, topology.AllDevices()[0].NUMANode)
+	assert.Equal(t, customNUMA, *topology.AllDevices()[0].NUMANode)
+
+	updated := rule.DeepCopy()
+	updated.Data["mapsTo"] = "pcieRoot"
+	updated.Data["type"] = "string"
+	updated.Data["attribute"] = "mock-device.example.com/pcie"
+	ctrl.onConfigMapUpdate(rule, updated)
+
+	require.Len(t, ctrl.model.GetRules(), 1)
+	assert.Equal(t, "mock-device.example.com/pcie", ctrl.model.GetRules()[0].Attribute)
+	topology = ctrl.model.GetNodeTopology("node-1")
+	require.NotNil(t, topology)
+	require.Len(t, topology.AllDevices(), 1)
+	assert.Nil(t, topology.AllDevices()[0].NUMANode)
+
+	ctrl.onConfigMapDelete(updated)
+	assert.Empty(t, ctrl.model.GetRules())
+}
+
+func TestController_TopologyRuleLabelRemovalClearsModel(t *testing.T) {
+	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModePartitions)
+	rule := makeTopologyRuleConfigMap("custom-rule", "default", map[string]string{
+		"attribute": "mock-device.example.com/numa",
+		"type":      "int",
+		"driver":    "mock-device.example.com",
+		"mapsTo":    "numaNode",
+	})
+	ctrl.onConfigMapAdd(rule)
+	require.Len(t, ctrl.model.GetRules(), 1)
+
+	withoutRuleLabel := rule.DeepCopy()
+	withoutRuleLabel.Labels = nil
+	ctrl.onConfigMapUpdate(rule, withoutRuleLabel)
+	assert.Empty(t, ctrl.model.GetRules())
+}
+
 func TestController_Reconcile_AutoGroupingOverrideIsNotDiagnosedAsDuplicate(t *testing.T) {
 	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModeGroupings)
 	addGPUAndNICTopology(ctrl)

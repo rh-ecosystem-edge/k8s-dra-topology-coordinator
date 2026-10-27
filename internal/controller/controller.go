@@ -180,7 +180,7 @@ func (c *Controller) StartCache(ctx context.Context) error {
 			}
 		}
 	}
-	c.model.SetRules(c.ruleStore.GetRules())
+	c.refreshModelRules()
 
 	// Load device grouping ConfigMaps
 	for _, obj := range groupingCMInformer.GetStore().List() {
@@ -261,9 +261,7 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	start := time.Now()
 
 	// Update rules in the model
-	rules := c.ruleStore.GetRules()
-	c.model.SetRules(rules)
-	metrics.TopologyRulesTotal.Set(float64(len(rules)))
+	c.refreshModelRules()
 
 	groupings := c.groupingStore.GetGroupings()
 
@@ -397,6 +395,12 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	return nil
 }
 
+func (c *Controller) refreshModelRules() {
+	rules := c.ruleStore.GetRules()
+	c.model.SetRules(rules)
+	metrics.TopologyRulesTotal.Set(float64(len(rules)))
+}
+
 // onSliceAdd handles a new ResourceSlice.
 func (c *Controller) onSliceAdd(obj interface{}) {
 	slice, ok := obj.(*resourcev1.ResourceSlice)
@@ -445,12 +449,15 @@ func (c *Controller) onConfigMapAdd(obj interface{}) {
 		return
 	}
 	if cm.Labels[TopologyRuleLabel] != "true" {
+		c.ruleStore.RemoveConfigMap(cm.Namespace, cm.Name)
+		c.refreshModelRules()
 		return
 	}
 	if err := c.ruleStore.LoadFromConfigMap(cm); err != nil {
 		klog.Errorf("Failed to load topology rule from %s/%s: %v", cm.Namespace, cm.Name, err)
 		return
 	}
+	c.refreshModelRules()
 	c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 }
 
@@ -461,12 +468,15 @@ func (c *Controller) onConfigMapUpdate(_, newObj interface{}) {
 		return
 	}
 	if cm.Labels[TopologyRuleLabel] != "true" {
+		c.ruleStore.RemoveConfigMap(cm.Namespace, cm.Name)
+		c.refreshModelRules()
 		return
 	}
 	if err := c.ruleStore.LoadFromConfigMap(cm); err != nil {
 		klog.Errorf("Failed to update topology rule from %s/%s: %v", cm.Namespace, cm.Name, err)
 		return
 	}
+	c.refreshModelRules()
 	c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 }
 
@@ -483,10 +493,8 @@ func (c *Controller) onConfigMapDelete(obj interface{}) {
 			return
 		}
 	}
-	if cm.Labels[TopologyRuleLabel] != "true" {
-		return
-	}
 	c.ruleStore.RemoveConfigMap(cm.Namespace, cm.Name)
+	c.refreshModelRules()
 	c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 }
 
