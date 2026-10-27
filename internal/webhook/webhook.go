@@ -1064,9 +1064,10 @@ func pickExpandedRequest(names []string, kind, deviceName string, used map[strin
 		}
 		lower := strings.ToLower(name)
 		matches := true
-		if kind == "gpu" {
+		switch kind {
+		case "gpu":
 			matches = strings.Contains(lower, "gpu")
-		} else if kind == "host" {
+		case "host":
 			switch {
 			case strings.Contains(deviceName, "gpu"):
 				matches = strings.Contains(lower, "gpu")
