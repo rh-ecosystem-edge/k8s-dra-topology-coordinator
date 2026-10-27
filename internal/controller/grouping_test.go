@@ -138,6 +138,65 @@ func TestParseDeviceGrouping_PassthroughOffering(t *testing.T) {
 	assert.True(t, grouping.Devices[0].Passthrough)
 }
 
+func TestParseDeviceGrouping_RailOffering(t *testing.T) {
+	data := validGroupingData("gpu-nic-pair")
+	data["rail"] = "true"
+	data["devices"] = "- class: gpu.example.com\n  count: 1\n- class: rdma.example.com\n  count: 1"
+
+	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-nic-pair", data))
+	require.NoError(t, err)
+	assert.True(t, grouping.Rail)
+}
+
+func TestParseDeviceGrouping_RailValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(map[string]string)
+		errText string
+	}{
+		{
+			name:    "invalid boolean",
+			mutate:  func(data map[string]string) { data["rail"] = "yes" },
+			errText: "rail",
+		},
+		{
+			name: "wrong alignment",
+			mutate: func(data map[string]string) {
+				data["rail"] = "true"
+				data["alignment"] = "numaNode"
+			},
+			errText: "alignment",
+		},
+		{
+			name: "wrong device count",
+			mutate: func(data map[string]string) {
+				data["rail"] = "true"
+				data["devices"] = "- class: gpu.example.com\n  count: 1"
+			},
+			errText: "exactly two",
+		},
+		{
+			name: "device count is not one",
+			mutate: func(data map[string]string) {
+				data["rail"] = "true"
+				data["devices"] = "- class: gpu.example.com\n  count: 2\n- class: rdma.example.com\n  count: 1"
+			},
+			errText: "count 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := validGroupingData("gpu-nic-pair")
+			tt.mutate(data)
+			err := NewGroupingStore().LoadFromConfigMap(makeGroupingConfigMap("gpu-nic-pair", data))
+			if assert.Error(t, err) {
+				assert.ErrorContains(t, err, tt.errText)
+			}
+		})
+	}
+}
+
 func TestParseDeviceGrouping_InvalidMode(t *testing.T) {
 	data := validGroupingData("test")
 	data["mode"] = "vm"
@@ -223,6 +282,18 @@ func TestGroupingStore_GetGroupingsDeepCopiesIntent(t *testing.T) {
 	require.Len(t, second, 1)
 	assert.Equal(t, []string{"gpu", "inference"}, second[0].Intent.Categories)
 	assert.Equal(t, []string{"training", "serving"}, second[0].Intent.WorkloadTypes)
+}
+
+func TestGroupingStore_GetGroupingsPreservesRail(t *testing.T) {
+	store := NewGroupingStore()
+	data := validGroupingData("gpu-nic-pair")
+	data["rail"] = "true"
+	data["devices"] = "- class: gpu.example.com\n  count: 1\n- class: rdma.example.com\n  count: 1"
+	require.NoError(t, store.LoadFromConfigMap(makeGroupingConfigMap("gpu-nic-pair", data)))
+
+	groupings := store.GetGroupings()
+	require.Len(t, groupings, 1)
+	assert.True(t, groupings[0].Rail)
 }
 
 func TestGroupingStore_LoadFromConfigMap(t *testing.T) {
@@ -421,6 +492,7 @@ func TestGroupingBuilder_BuildGroupingsCarriesIntentMetadata(t *testing.T) {
 	grouping := DeviceGrouping{
 		Name:      "gpu-inference",
 		Alignment: "pcieRoot",
+		Rail:      true,
 		Devices:   []GroupingDevice{{Class: "gpu.amd.com", Count: 1}},
 		Intent:    intent,
 	}
@@ -429,6 +501,7 @@ func TestGroupingBuilder_BuildGroupingsCarriesIntentMetadata(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Len(t, results[0].Instances, 1)
 	assert.Equal(t, intent, results[0].Instances[0].Intent)
+	assert.True(t, results[0].Instances[0].Rail)
 }
 
 func TestGroupingBuilder_UnsatisfiableGrouping(t *testing.T) {
@@ -755,7 +828,7 @@ func TestGroupingBuilder_FallbackFromPCIeRootToNUMA(t *testing.T) {
 	assert.True(t, hasNUMAInstance, "should have a numaNode fallback instance")
 }
 
-func TestGroupingBuilder_RailIndexDeterministic(t *testing.T) {
+func TestGroupingBuilder_InstanceIndexDeterministic(t *testing.T) {
 	model := NewTopologyModel()
 	rules := NewTopologyRuleStore()
 
@@ -781,13 +854,14 @@ func TestGroupingBuilder_RailIndexDeterministic(t *testing.T) {
 	grouping := DeviceGrouping{
 		Name:      "gpu-nic-pair",
 		Alignment: "pcieRoot",
+		Rail:      true,
 		Devices: []GroupingDevice{
 			{Class: "gpu.amd.com", Count: 1},
 			{Class: "rdma.mellanox.com", Count: 1},
 		},
 	}
 
-	// Run twice — rail indices should be identical
+	// Run twice — instance indexes should be identical
 	results1 := builder.BuildGroupings([]DeviceGrouping{grouping})
 	results2 := builder.BuildGroupings([]DeviceGrouping{grouping})
 
@@ -797,7 +871,8 @@ func TestGroupingBuilder_RailIndexDeterministic(t *testing.T) {
 	require.Len(t, results2[0].Instances, 2)
 
 	for i := range results1[0].Instances {
-		assert.Equal(t, results1[0].Instances[i].RailIndex, results2[0].Instances[i].RailIndex,
-			"rail index should be deterministic across calls")
+		assert.Equal(t, results1[0].Instances[i].InstanceIndex, results2[0].Instances[i].InstanceIndex,
+			"instance index should be deterministic across calls")
+		assert.True(t, results1[0].Instances[i].Rail)
 	}
 }
