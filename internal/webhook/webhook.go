@@ -380,6 +380,10 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 
 		splitCount := 1
 		deviceCount := sr.Count
+		if config.Mode == controller.OfferingModePassthrough && sr.Passthrough && len(sr.Capacity) == 0 && sr.Count > 1 {
+			splitCount = sr.Count
+			deviceCount = 1
+		}
 
 		for si := 0; si < splitCount; si++ {
 			var name string
@@ -634,40 +638,45 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 	claimExpansions := make(map[string]*claimExpansion) // pod claim name → expansion
 
 	for _, prc := range pod.Spec.ResourceClaims {
-		// Resolve the claim name — direct reference or template-generated.
-		// Template-generated claims use a naming convention: <pod-name>-<template-name>.
-		// During CREATE admission the pod may not have a name yet (generateName),
-		// so we try direct lookup first.
-		var claimToLookup string
 		if prc.ResourceClaimName != nil && *prc.ResourceClaimName != "" {
-			claimToLookup = *prc.ResourceClaimName
-		} else if prc.ResourceClaimTemplateName != nil && *prc.ResourceClaimTemplateName != "" {
-			// For template claims, the ResourceClaim is created by the scheduler
-			// with name <pod-name>-<claim-name>. Try looking up the template claim.
-			claimToLookup = *prc.ResourceClaimTemplateName
-		}
-		if claimToLookup == "" {
+			claimName := *prc.ResourceClaimName
+			claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimName, metav1.GetOptions{})
+			if err != nil {
+				klog.V(4).Infof("Could not look up claim %s/%s for pod rewriting: %v", req.Namespace, claimName, err)
+				continue
+			}
+			annotation := claim.Annotations[driverName+"/expanded-requests"]
+			if annotation == "" {
+				continue
+			}
+			var mapping map[string][]string
+			if err := json.Unmarshal([]byte(annotation), &mapping); err != nil {
+				klog.Warningf("Failed to parse expansion annotation on claim %s: %v", claimName, err)
+				continue
+			}
+			claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
 			continue
 		}
 
-		claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimToLookup, metav1.GetOptions{})
-		if err != nil {
-			klog.V(4).Infof("Could not look up claim %s/%s for pod rewriting: %v", req.Namespace, claimToLookup, err)
-			continue
+		if prc.ResourceClaimTemplateName != nil && *prc.ResourceClaimTemplateName != "" {
+			templateName := *prc.ResourceClaimTemplateName
+			template, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
+			if err != nil {
+				return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
+			}
+			mapping, err := ce.expansionMapping(ctx, template.Spec.Spec.Devices.Requests)
+			if err != nil {
+				klog.Warningf("Failed to expand claim template %s: %v", templateName, err)
+				var managedErr *managedExpansionError
+				if errors.As(err, &managedErr) {
+					return denyResponse(err.Error())
+				}
+				continue
+			}
+			if len(mapping) > 0 {
+				claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
+			}
 		}
-
-		annotation := claim.Annotations[driverName+"/expanded-requests"]
-		if annotation == "" {
-			continue
-		}
-
-		var mapping map[string][]string
-		if err := json.Unmarshal([]byte(annotation), &mapping); err != nil {
-			klog.Warningf("Failed to parse expansion annotation on claim %s: %v", claimToLookup, err)
-			continue
-		}
-
-		claimExpansions[prc.Name] = &claimExpansion{mapping: mapping}
 	}
 
 	if len(claimExpansions) == 0 {
@@ -738,6 +747,27 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 	}
 }
 
+func (ce *ClaimExpander) expansionMapping(ctx context.Context, requests []resourcev1.DeviceRequest) (map[string][]string, error) {
+	mapping := make(map[string][]string)
+	for _, req := range requests {
+		if req.Exactly == nil {
+			continue
+		}
+		config, err := ce.getPartitionConfig(ctx, req.Exactly.DeviceClassName)
+		if err != nil {
+			return nil, err
+		}
+		if config == nil {
+			continue
+		}
+		subRequests, _ := ce.expandRequest(req, config)
+		for _, subRequest := range subRequests {
+			mapping[req.Name] = append(mapping[req.Name], subRequest.Name)
+		}
+	}
+	return mapping, nil
+}
+
 // handleVMIAdmission auto-generates hostDevices for KubeVirt VMIs that
 // reference partition ResourceClaimTemplates, and rewrites requestName fields
 // on any existing hostDevices/gpus to match expanded partition request names.
@@ -754,6 +784,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	existingHostDevices := nestedSlice(vmi, "spec", "domain", "devices", "hostDevices")
 	hdIdx := len(existingHostDevices)
 	globalDevIdx := 0
+	templateMappings := make(map[string]map[string][]string)
 
 	// For each resourceClaim referencing a template, look up the template's
 	// DeviceClass config and auto-generate hostDevices if none exist for it.
@@ -768,6 +799,20 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 			continue
 		}
 
+		// Resolve every template before deciding whether to generate devices.
+		// Existing devices still need the template mapping for request rewrites.
+		tpl, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
+		if err != nil {
+			return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
+		}
+		mapping, err := ce.expansionMapping(ctx, tpl.Spec.Spec.Devices.Requests)
+		if err != nil {
+			return denyResponse(fmt.Sprintf("failed to expand ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
+		}
+		if len(mapping) > 0 {
+			templateMappings[rcName] = mapping
+		}
+
 		// Check if the VMI already has hostDevices for this claim
 		hasDevices := false
 		for _, hd := range existingHostDevices {
@@ -780,13 +825,6 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		if hasDevices {
 			continue
 		}
-
-		// Look up the ResourceClaimTemplate
-		tpl, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
-		if err != nil {
-			klog.Warningf("VMI webhook: failed to get ResourceClaimTemplate %s: %v", templateName, err)
-			continue
-		}
 		// Find the partition request and its DeviceClass
 		for _, tplReq := range tpl.Spec.Spec.Devices.Requests {
 			if tplReq.Exactly == nil || tplReq.Exactly.DeviceClassName == "" {
@@ -794,7 +832,14 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 			}
 
 			config, err := ce.getPartitionConfig(ctx, tplReq.Exactly.DeviceClassName)
-			if err != nil || config == nil {
+			if err != nil {
+				var managedErr *managedExpansionError
+				if errors.As(err, &managedErr) {
+					return denyResponse(err.Error())
+				}
+				continue
+			}
+			if config == nil {
 				continue
 			}
 
@@ -821,11 +866,15 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 					} else if strings.Contains(lc, "net") || strings.Contains(lc, "sriov") || strings.Contains(lc, "rdma") {
 						hint = "nic"
 					}
+					splitCount := sr.Count
+					if len(sr.Capacity) > 0 || splitCount <= 1 {
+						splitCount = 1
+					}
 					passthroughDevices = append(passthroughDevices, struct {
 						class    string
 						nameHint string
 						srCount  int
-					}{sr.DeviceClass, hint, sr.Count})
+					}{sr.DeviceClass, hint, splitCount})
 				}
 			}
 
@@ -840,12 +889,15 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 						// Build the expanded request name matching the split
 						// pattern from claim expansion
 						var requestName string
-						sanitized := sanitizeForRequestName(pd.class)
+						sanitized := sanitizeDeviceClassName(pd.class)
 						prefix := tplReq.Name
 						if count > 1 {
 							prefix = fmt.Sprintf("%s-%d", tplReq.Name, i)
 						}
 						requestName = fmt.Sprintf("%s-%s", prefix, sanitized)
+						if pd.srCount > 1 {
+							requestName = fmt.Sprintf("%s-%s-%d", prefix, sanitized, si)
+						}
 
 						deviceName := fmt.Sprintf("%s%d", pd.nameHint, globalDevIdx)
 						globalDevIdx++
@@ -875,9 +927,13 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 				}
 			}
 
+			generatedHostDevices := 0
+			for _, pd := range passthroughDevices {
+				generatedHostDevices += pd.srCount
+			}
 			vmiName, _ := vmi["metadata"].(map[string]interface{})["name"].(string)
 			klog.Infof("Auto-generated %d hostDevices for VMI %s/%s from template %s (count=%d)",
-				int(count)*len(passthroughDevices), req.Namespace, vmiName, templateName, count)
+				int(count)*generatedHostDevices, req.Namespace, vmiName, templateName, count)
 		}
 	}
 
@@ -891,6 +947,10 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		}
 		claimName, _ := rcMap["resourceClaimName"].(string)
 		if claimName == "" {
+			claimName, _ = rcMap["name"].(string)
+			if mapping := templateMappings[claimName]; len(mapping) > 0 {
+				expansionMap[claimName] = mapping
+			}
 			continue
 		}
 		claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimName, metav1.GetOptions{})
@@ -910,6 +970,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	}
 
 	if len(expansionMap) > 0 {
+		usedExpanded := make(map[string]map[string]bool)
 		gpus := nestedSlice(vmi, "spec", "domain", "devices", "gpus")
 		for i, g := range gpus {
 			gMap, ok := g.(map[string]interface{})
@@ -929,16 +990,20 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 			if !ok || len(expanded) == 0 {
 				continue
 			}
-			for _, name := range expanded {
-				if strings.Contains(name, "gpu") {
-					patches = append(patches, jsonPatch{
-						Op:    "replace",
-						Path:  fmt.Sprintf("/spec/domain/devices/gpus/%d/requestName", i),
-						Value: name,
-					})
-					break
-				}
+			key := claimName + "\x00" + requestName
+			name, ok := pickExpandedRequest(expanded, "gpu", "", usedExpanded[key])
+			if !ok {
+				continue
 			}
+			if usedExpanded[key] == nil {
+				usedExpanded[key] = make(map[string]bool)
+			}
+			usedExpanded[key][name] = true
+			patches = append(patches, jsonPatch{
+				Op:    "replace",
+				Path:  fmt.Sprintf("/spec/domain/devices/gpus/%d/requestName", i),
+				Value: name,
+			})
 		}
 
 		hostDevices := nestedSlice(vmi, "spec", "domain", "devices", "hostDevices")
@@ -961,27 +1026,16 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 				continue
 			}
 			deviceName, _ := hdMap["name"].(string)
-			matched := false
-			for _, name := range expanded {
-				if (strings.Contains(name, "net") || strings.Contains(name, "sriov")) && strings.Contains(deviceName, "nic") {
-					patches = append(patches, jsonPatch{Op: "replace", Path: fmt.Sprintf("/spec/domain/devices/hostDevices/%d/requestName", i), Value: name})
-					matched = true
-					break
-				}
-				if strings.Contains(name, "nvme") && strings.Contains(deviceName, "nvme") {
-					patches = append(patches, jsonPatch{Op: "replace", Path: fmt.Sprintf("/spec/domain/devices/hostDevices/%d/requestName", i), Value: name})
-					matched = true
-					break
-				}
+			key := claimName + "\x00" + requestName
+			name, ok := pickExpandedRequest(expanded, "host", deviceName, usedExpanded[key])
+			if !ok {
+				continue
 			}
-			if !matched {
-				for _, name := range expanded {
-					if !strings.Contains(name, "gpu") {
-						patches = append(patches, jsonPatch{Op: "replace", Path: fmt.Sprintf("/spec/domain/devices/hostDevices/%d/requestName", i), Value: name})
-						break
-					}
-				}
+			if usedExpanded[key] == nil {
+				usedExpanded[key] = make(map[string]bool)
 			}
+			usedExpanded[key][name] = true
+			patches = append(patches, jsonPatch{Op: "replace", Path: fmt.Sprintf("/spec/domain/devices/hostDevices/%d/requestName", i), Value: name})
 		}
 	}
 
@@ -1006,11 +1060,36 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	}
 }
 
+func pickExpandedRequest(names []string, kind, deviceName string, used map[string]bool) (string, bool) {
+	deviceName = strings.ToLower(deviceName)
+	for _, name := range names {
+		if used != nil && used[name] {
+			continue
+		}
+		lower := strings.ToLower(name)
+		matches := true
+		switch kind {
+		case "gpu":
+			matches = strings.Contains(lower, "gpu")
+		case "host":
+			switch {
+			case strings.Contains(deviceName, "gpu"):
+				matches = strings.Contains(lower, "gpu")
+			case strings.Contains(deviceName, "nic"), strings.Contains(deviceName, "net"), strings.Contains(deviceName, "rdma"), strings.Contains(deviceName, "sriov"):
+				matches = strings.Contains(lower, "net") || strings.Contains(lower, "rdma") || strings.Contains(lower, "sriov")
+			case strings.Contains(deviceName, "nvme"):
+				matches = strings.Contains(lower, "nvme")
+			}
+		}
+		if matches {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 func sanitizeForRequestName(s string) string {
-	return strings.NewReplacer(
-		"/", "-",
-		".", "-",
-	).Replace(strings.ToLower(s))
+	return sanitizeDeviceClassName(s)
 }
 
 // nestedSlice extracts a nested []interface{} from a map hierarchy.
