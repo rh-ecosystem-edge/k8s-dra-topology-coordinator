@@ -168,6 +168,15 @@ func TestParseDeviceGrouping_RailValidation(t *testing.T) {
 			errText: "alignment",
 		},
 		{
+			name: "fallback is not allowed",
+			mutate: func(data map[string]string) {
+				data["rail"] = "true"
+				data["fallback"] = "numaNode"
+				data["devices"] = "- class: gpu.example.com\n  count: 1\n- class: rdma.example.com\n  count: 1"
+			},
+			errText: "fallback",
+		},
+		{
 			name: "wrong device count",
 			mutate: func(data map[string]string) {
 				data["rail"] = "true"

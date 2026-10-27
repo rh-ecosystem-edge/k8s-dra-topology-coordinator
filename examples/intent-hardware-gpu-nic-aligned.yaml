@@ -8,7 +8,6 @@ data:
   name: gpu-nic-aligned
   rail: "true"
   alignment: pcieRoot
-  fallback: numaNode
   devices: |
     - class: gpu.nvidia.com
       count: 1

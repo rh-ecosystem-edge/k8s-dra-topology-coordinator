@@ -269,6 +269,9 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		if g.Alignment != "pcieRoot" {
 			return g, fmt.Errorf("rail offerings require alignment pcieRoot")
 		}
+		if g.Fallback != "" {
+			return g, fmt.Errorf("rail offerings cannot use fallback; GPU and NIC devices must share a PCIe root")
+		}
 		if len(devices) != 2 {
 			return g, fmt.Errorf("rail offerings require exactly two devices")
 		}
