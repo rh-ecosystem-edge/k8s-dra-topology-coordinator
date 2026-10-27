@@ -662,8 +662,7 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 			templateName := *prc.ResourceClaimTemplateName
 			template, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
 			if err != nil {
-				klog.V(4).Infof("Could not look up claim template %s/%s for pod rewriting: %v", req.Namespace, templateName, err)
-				continue
+				return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
 			}
 			mapping, err := ce.expansionMapping(ctx, template.Spec.Spec.Devices.Requests)
 			if err != nil {
@@ -815,8 +814,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		// Look up the ResourceClaimTemplate
 		tpl, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
 		if err != nil {
-			klog.Warningf("VMI webhook: failed to get ResourceClaimTemplate %s: %v", templateName, err)
-			continue
+			return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
 		}
 		// Find the partition request and its DeviceClass
 		for _, tplReq := range tpl.Spec.Spec.Devices.Requests {

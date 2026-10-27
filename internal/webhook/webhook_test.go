@@ -1347,6 +1347,28 @@ func TestHandlePodAdmission_RejectsManagedTemplateLookupError(t *testing.T) {
 	assert.False(t, resp.Allowed)
 }
 
+func TestHandlePodAdmission_RejectsMissingTemplate(t *testing.T) {
+	templateName := "missing-template"
+	client := fake.NewSimpleClientset()
+	expander := NewClaimExpander(client)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-template-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			ResourceClaims: []corev1.PodResourceClaim{{Name: "partition-claim", ResourceClaimTemplateName: &templateName}},
+		},
+	}
+	podJSON, err := json.Marshal(pod)
+	require.NoError(t, err)
+	resp := expander.handlePodAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "missing-template-pod-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: podJSON},
+	})
+	assert.False(t, resp.Allowed)
+}
+
 func TestHandleVMIAdmission_NoTemplates(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	expander := NewClaimExpander(client)
@@ -1379,6 +1401,29 @@ func TestHandleVMIAdmission_NoTemplates(t *testing.T) {
 	resp := expander.handleVMIAdmission(context.Background(), req)
 	assert.True(t, resp.Allowed)
 	assert.Nil(t, resp.PatchType, "VMI without templates should not be mutated")
+}
+
+func TestHandleVMIAdmission_RejectsMissingTemplate(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	expander := NewClaimExpander(client)
+	vmi := map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "missing-template-vmi"},
+		"spec": map[string]interface{}{
+			"resourceClaims": []interface{}{map[string]interface{}{
+				"name": "partition", "resourceClaimTemplateName": "missing-template",
+			}},
+		},
+	}
+	vmiJSON, err := json.Marshal(vmi)
+	require.NoError(t, err)
+	resp := expander.handleVMIAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "missing-template-vmi-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: vmiJSON},
+	})
+	assert.False(t, resp.Allowed)
 }
 
 func TestHandleVMIAdmission_GeneratesHostDevices(t *testing.T) {
