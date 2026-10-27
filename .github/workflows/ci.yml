@@ -46,3 +46,15 @@ jobs:
         run: helm template test deploy/helm/nodepartition --debug
       - name: Lint Helm chart
         run: helm lint deploy/helm/nodepartition
+      - name: Verify Helm feature matrix
+        run: ./test/e2e/check-helm.sh
+
+  e2e-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Compile tagged E2E suite
+        run: go test -tags=e2e ./test/e2e -count=1

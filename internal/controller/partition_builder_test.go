@@ -78,6 +78,32 @@ func TestPartitionBuilder_HGXScenario(t *testing.T) {
 	assert.Equal(t, 1, counts[PartitionFull], "expected 1 full partition")
 }
 
+func TestPartitionBuilder_DoesNotCombineDriversAcrossNodes(t *testing.T) {
+	model := NewTopologyModel()
+	builder := NewPartitionBuilder(model, NewTopologyRuleStore())
+
+	model.UpdateFromResourceSlice(makeResourceSlice("gpu", "gpu.nvidia.com", "gpu-node", "gpu-pool", []resourcev1.Device{
+		makeGPUDevice("gpu-0", 0, "pcie-0"),
+	}))
+	model.UpdateFromResourceSlice(makeResourceSlice("cpu", "dra.cpu", "cpu-node", "cpu-pool", []resourcev1.Device{{
+		Name: "cpu-0",
+		Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+			resourcev1.QualifiedName(AttrNUMANode): {IntValue: intPtr(0)},
+		},
+		Capacity: map[resourcev1.QualifiedName]resourcev1.DeviceCapacity{
+			"dra.cpu/cpu": {Value: resource.MustParse("32")},
+		},
+	}}))
+
+	results := builder.BuildPartitions()
+	require.Len(t, results, 2)
+	profiles := map[string]bool{}
+	for _, result := range results {
+		profiles[result.Profile] = true
+	}
+	assert.Equal(t, map[string]bool{"gpu.nvidia.com": true, "dra.cpu": true}, profiles)
+}
+
 func TestPartitionBuilder_EighthPartitionContents(t *testing.T) {
 	model := NewTopologyModel()
 	rules := NewTopologyRuleStore()

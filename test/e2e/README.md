@@ -1,118 +1,82 @@
-# E2E tests
+# End-to-end tests
 
-These tests exercise the Node Partition Topology Coordinator against a live Kubernetes cluster. They use:
+The live suite exercises the coordinator against a real Kubernetes API server. It is intentionally separate from ordinary unit and envtest runs because it mutates cluster-scoped DRA resources.
 
-- [mock-device](https://github.com/fabiendupont/mock-device), which is required and must publish `mock-accel.example.com` `ResourceSlice` objects; and
-- [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu), which is optional and must run in individual mode when used.
+## Requirements
 
-The driver `ResourceSlice` objects are the test inputs. The coordinator consumes them and publishes managed `DeviceClass` objects; it does not publish coordinator `ResourceSlice` objects.
+- Kubernetes 1.34 or newer with DRA enabled;
+- a disposable cluster context in `E2E_KUBECONFIG`;
+- the mock-device DRA driver publishing `mock-accel.example.com` `ResourceSlice` objects;
+- `kubectl`, Helm, and Go;
+- a locally available `dev` coordinator image; and
+- `dra-driver-cpu` in individual mode for the required cross-driver profile;
+- a working webhook TLS provider (the default is cert-manager with the
+  `selfsigned-issuer` `ClusterIssuer`; use `E2E_TLS_*` to select another one).
 
-## Quick start: mock-device Vagrant cluster
+The suite refuses to run unless `E2E_DISPOSABLE_CLUSTER=1` (or `true`/`yes`) is set. This is required because `DeviceClass` and admission configurations are cluster-scoped.
 
-If the mock-device Vagrant cluster is already running with its DRA driver deployed:
-
-```sh
-# From the mock-device checkout
-cd ../mock-device/vagrant
-vagrant provision --provision-with nodepartition
-
-# Or from this repository
-./test/e2e/run-e2e.sh
-```
-
-## Manual setup
-
-### Prerequisites
-
-1. A Kubernetes 1.34 or newer cluster with DRA enabled.
-2. The mock-device DRA driver deployed and publishing `ResourceSlice` objects for `mock-accel.example.com`.
-3. Optionally, `dra-driver-cpu` deployed in individual mode with `--cpu-device-mode=individual`.
-4. `kubectl`, Helm, Python 3, and Docker or another image builder.
-5. A way to make the coordinator image available to the cluster.
-6. A working webhook TLS configuration. The Helm chart defaults to cert-manager and the `selfsigned-issuer` `ClusterIssuer`; configure an existing issuer or select another TLS mode before running the test.
-
-### Verify driver inputs
+## Run
 
 ```sh
-kubectl get resourceslices -o json | \
-  python3 -c "import sys,json; [print(s['metadata']['name'], s['spec']['driver']) for s in json.load(sys.stdin)['items']]"
+E2E_KUBECONFIG=/path/to/disposable/kubeconfig \
+E2E_DISPOSABLE_CLUSTER=1 \
+E2E_REQUIRE_CPU=1 \
+E2E_PROFILE=full \
+make e2e
 ```
 
-For the optional CPU driver, verify that it publishes slices under `dra.cpu`:
+`test/e2e/run-e2e.sh` creates unique namespace, release, and run identifiers when they are not supplied. It rejects existing managed coordinator `DeviceClass` objects and cleans only resources created by that run.
 
-```sh
-kubectl get resourceslices -o json | \
-  python3 -c "import sys,json; [print(s['metadata']['name']) for s in json.load(sys.stdin)['items'] if s['spec']['driver']=='dra.cpu']"
-```
+Useful variables:
 
-### Build and load the coordinator image
-
-The chart's default repository is `ghcr.io/rh-ecosystem-edge/nodepartition-controller`; the E2E script uses the `dev` tag.
-
-```sh
-make build
-docker build -t ghcr.io/rh-ecosystem-edge/nodepartition-controller:dev .
-```
-
-For a k3s cluster, import the image on a node:
-
-```sh
-docker save ghcr.io/rh-ecosystem-edge/nodepartition-controller:dev | \
-  ssh <node> sudo k3s ctr images import -
-```
-
-If your cluster uses a different image repository, install the chart manually with matching `controller.image.repository` and `controller.image.tag` values, or adjust the script's Helm command for the local environment.
-
-### Run the tests
-
-```sh
-./test/e2e/run-e2e.sh
-```
-
-The script:
-
-1. checks for the required mock-accel driver and detects the optional CPU driver;
-2. applies the topology-rule ConfigMaps in [`topology-rules.yaml`](topology-rules.yaml);
-3. installs the coordinator with Helm and waits for its Deployment;
-4. waits for coordinator-managed `DeviceClass` objects;
-5. validates partition type labels, selectors, opaque `PartitionConfig`, and mock-device sub-resources;
-6. validates cross-driver configuration and per-driver NUMA selectors when `dra-driver-cpu` is present; and
-7. removes the test ConfigMaps, Helm release, and managed DeviceClasses on exit.
-
-## What gets validated
-
-### Single-driver checks
-
-| Check | Description |
-| --- | --- |
-| Driver input | mock-accel `ResourceSlice` objects are present |
-| Coordinator output | Managed `DeviceClass` objects are created |
-| Partition types | `pcieroot`, `numa`, and `full` types are reported when the topology provides them |
-| DeviceClass selector | At least one class has the coordinator CEL selector |
-| PartitionConfig | An opaque coordinator configuration exists and references mock-accel sub-resources |
-
-Tier aliases such as `eighth`, `quarter`, or `half` are hardware-dependent and are not required by the script.
-
-### Cross-driver checks
-
-When `dra-driver-cpu` is present, the test also checks:
-
-| Check | Description |
-| --- | --- |
-| Shared nodes | Both drivers publish `ResourceSlice` objects on at least one node |
-| Multi-driver profile | Generated coordinator classes include both driver profiles |
-| CPU sub-resource | `PartitionConfig` references `dra.cpu` |
-| NUMA selectors | Per-driver NUMA selectors are present for both participating drivers |
-
-## Topology rules
-
-[`topology-rules.yaml`](topology-rules.yaml) maps the test drivers' attributes to standard topology attributes:
-
-| Driver attribute | Standard attribute | Use |
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `mock-accel.example.com/numaNode` | `numaNode` | NUMA grouping |
-| `mock-accel.example.com/pciAddress` | `pcieRoot` | PCIe grouping |
-| `dra.cpu/numaNodeID` | `numaNode` | NUMA grouping |
-| `dra.cpu/socketID` | `socket` | Socket grouping |
+| `E2E_PROFILE` | `full` | `controller`, `cross-driver`, `admission`, `ha`, `full`, or `kubevirt` |
+| `E2E_NAMESPACE` | unique | Namespace owned by the run |
+| `E2E_RELEASE` | unique | Helm release owned by the run |
+| `E2E_RUN_ID` | unique | Owner label value |
+| `E2E_DRIVER_NAME` | `nodepartition.dra.k8s.io` | Coordinator identity used by the chart and webhook |
+| `E2E_TLS_MODE` | `cert-manager` | `cert-manager`, `openshift`, or `manual` |
+| `E2E_TLS_ISSUER_NAME` | `selfsigned-issuer` | cert-manager issuer name |
+| `E2E_TLS_ISSUER_KIND` | `ClusterIssuer` | cert-manager issuer kind |
+| `E2E_TLS_CA_BUNDLE` | empty | Required when `E2E_TLS_MODE=manual` |
+| `E2E_REQUIRE_CPU` | `false` | Require `dra.cpu` slices for cross-driver checks |
+| `E2E_REQUIRE_KUBEVIRT` | `false` | Require KubeVirt for the optional VMI profile |
+| `E2E_CHART_PATH` | repository chart | Chart path used by Helm |
 
-The rules are ordinary labeled ConfigMaps. They must be applied before the coordinator reconciles so the generated classes contain the expected driver-specific selectors.
+The tagged package can be compiled without a cluster:
+
+```sh
+go test -tags=e2e ./test/e2e -count=1
+```
+
+Without `E2E_KUBECONFIG`, live tests skip instead of mutating a developer cluster.
+
+## Coverage profiles
+
+### `controller`
+
+Validates ResourceSlice discovery, single- and cross-driver ResourceSlice intersection,
+topology rules, fixed partitions, generated selectors and opaque `PartitionConfig`,
+grouping modes, intent metadata, and stale-output cleanup.
+
+Use `E2E_PROFILE=cross-driver E2E_REQUIRE_CPU=1` to run the required shared-node
+mock-accelerator/CPU catalog checks without the admission and HA profiles.
+
+### `admission`
+
+Creates ResourceClaims through the API server and verifies expansion, native pass-through,
+malformed managed-claim rejection, update idempotence, direct and template-backed Pod
+rewriting, custom driver identity, and webhook TLS/service wiring.
+
+### `ha`
+
+Runs two controller replicas and verifies leader ownership, follower cache readiness, deterministic admission, leader deletion, lease handoff, and publication continuity.
+
+### `kubevirt`
+
+Optional live profile for VMI host-device generation, existing-device rewrites, explicit passthrough/VFIO behavior, count splitting, and capacity-backed requests. Fast unit/envtest coverage remains required even when this profile is unavailable.
+
+## CI
+
+The normal CI workflow compiles the tagged package. `.github/workflows/e2e.yml` runs the live `full` profile manually or nightly on a dedicated self-hosted runner that supplies the disposable cluster, drivers, image, and `E2E_KUBECONFIG`; CI deliberately uses a non-default `E2E_DRIVER_NAME` to exercise configured identity end to end.

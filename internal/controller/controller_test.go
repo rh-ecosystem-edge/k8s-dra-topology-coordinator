@@ -81,7 +81,7 @@ func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {
 
 func TestController_TopologyRuleEventsRefreshModelWithoutReconcile(t *testing.T) {
 	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModePartitions)
-	ctrl.synced = true
+	ctrl.synced.Store(true)
 	customNUMA := int64(3)
 	ctrl.model.UpdateFromResourceSlice(makeResourceSlice("custom-slice", "mock-device.example.com", "node-1", "pool", []resourcev1.Device{{
 		Name: "device-0",
