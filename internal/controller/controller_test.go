@@ -61,7 +61,7 @@ func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {
 	client := k8sfake.NewSimpleClientset()
 	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
 	addGPUAndNICTopology(ctrl)
-	ctrl.synced = true
+	ctrl.synced.Store(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

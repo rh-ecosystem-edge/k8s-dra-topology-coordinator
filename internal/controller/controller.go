@@ -58,9 +58,10 @@ type Controller struct {
 	groupingBuilder  *GroupingBuilder
 	classManager     *DeviceClassManager
 
-	// synced is set after informer caches are synced and initial reconcile completes.
+	// synced is set after informer caches are synchronized. It is atomic because
+	// informer callbacks can run while StartCache is finishing.
 	// Event handlers skip enqueueing reconciles until this is true.
-	synced bool
+	synced atomic.Bool
 
 	// workqueue triggers a full reconciliation when topology changes
 	workqueue  workqueue.TypedRateLimitingInterface[string]
@@ -190,7 +191,7 @@ func (c *Controller) StartCache(ctx context.Context) error {
 		}
 	}
 
-	c.synced = true
+	c.synced.Store(true)
 	return nil
 }
 
@@ -215,7 +216,7 @@ func (c *Controller) SetPublishing(enabled bool) {
 
 // EnqueueReconcile requests a full reconciliation.
 func (c *Controller) EnqueueReconcile() {
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.Add("reconcile")
 	}
 }
@@ -403,7 +404,7 @@ func (c *Controller) onSliceAdd(obj interface{}) {
 		return
 	}
 	c.model.UpdateFromResourceSlice(slice)
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -415,7 +416,7 @@ func (c *Controller) onSliceUpdate(_, newObj interface{}) {
 		return
 	}
 	c.model.UpdateFromResourceSlice(slice)
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -502,7 +503,7 @@ func (c *Controller) onGroupingConfigMapAdd(obj interface{}) {
 		klog.Errorf("Failed to load device grouping from %s/%s: %v", cm.Namespace, cm.Name, err)
 		return
 	}
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -521,7 +522,7 @@ func (c *Controller) onGroupingConfigMapUpdate(_, newObj interface{}) {
 			cm.Namespace, cm.Name, err)
 		return
 	}
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
