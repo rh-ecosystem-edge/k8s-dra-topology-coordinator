@@ -204,7 +204,7 @@ func (c *Controller) StartCache(ctx context.Context) error {
 // current but skip publication until a leadership-scoped context is active.
 func (c *Controller) RunWorker(ctx context.Context) error {
 	klog.Info("Starting topology coordinator worker")
-	go c.runWorker(ctx)
+	go c.runWorker()
 	<-ctx.Done()
 	c.StopPublishing()
 	c.workqueue.ShutDown()
@@ -271,7 +271,7 @@ func (c *Controller) Run(ctx context.Context) error {
 }
 
 // runWorker processes items from the workqueue.
-func (c *Controller) runWorker(ctx context.Context) {
+func (c *Controller) runWorker() {
 	for {
 		key, shutdown := c.workqueue.Get()
 		if shutdown {

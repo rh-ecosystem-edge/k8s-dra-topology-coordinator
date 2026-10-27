@@ -147,7 +147,7 @@ func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {
 
 func TestController_TopologyRuleEventsRefreshModelWithoutReconcile(t *testing.T) {
 	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModePartitions)
-	ctrl.synced = true
+	ctrl.synced.Store(true)
 	customNUMA := int64(3)
 	ctrl.model.UpdateFromResourceSlice(makeResourceSlice("custom-slice", "mock-device.example.com", "node-1", "pool", []resourcev1.Device{{
 		Name: "device-0",
@@ -222,7 +222,7 @@ func TestController_StoppingPublishingCancelsInFlightReconcile(t *testing.T) {
 	}
 	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
 	addGPUAndNICTopology(ctrl)
-	ctrl.synced = true
+	ctrl.synced.Store(true)
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
@@ -274,7 +274,7 @@ func TestController_LeadershipHandoffUsesFreshContext(t *testing.T) {
 	client := &blockingKubeClient{Interface: baseClient, resource: resourceClient}
 	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
 	addGPUAndNICTopology(ctrl)
-	ctrl.synced = true
+	ctrl.synced.Store(true)
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
