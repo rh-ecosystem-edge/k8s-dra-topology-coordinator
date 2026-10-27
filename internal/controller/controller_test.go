@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1"
 	klog "k8s.io/klog/v2"
 )
 
@@ -37,6 +40,39 @@ func addGPUAndNICTopology(ctrl *Controller) {
 	ctrl.Model().UpdateFromResourceSlice(makeResourceSlice("nic-slice", "rdma.mellanox.com", "node-1", "nic-pool", []resourcev1.Device{
 		makeNICDevice("nic-0", 0, "pcie-0"),
 	}))
+}
+
+type blockingDeviceClasses struct {
+	resourceclient.DeviceClassInterface
+	started      sync.Once
+	finishedOnce sync.Once
+	entered      chan struct{}
+	finished     chan struct{}
+}
+
+func (c *blockingDeviceClasses) Get(ctx context.Context, name string, opts metav1.GetOptions) (*resourcev1.DeviceClass, error) {
+	c.started.Do(func() { close(c.entered) })
+	<-ctx.Done()
+	c.finishedOnce.Do(func() { close(c.finished) })
+	return nil, ctx.Err()
+}
+
+type blockingResourceClient struct {
+	resourceclient.ResourceV1Interface
+	deviceClasses resourceclient.DeviceClassInterface
+}
+
+func (c *blockingResourceClient) DeviceClasses() resourceclient.DeviceClassInterface {
+	return c.deviceClasses
+}
+
+type blockingKubeClient struct {
+	kubernetes.Interface
+	resource resourceclient.ResourceV1Interface
+}
+
+func (c *blockingKubeClient) ResourceV1() resourceclient.ResourceV1Interface {
+	return c.resource
 }
 
 func TestController_Reconcile_DuplicateUserNamesLogsActionableError(t *testing.T) {
@@ -137,6 +173,61 @@ func TestController_TopologyRuleLabelRemovalClearsModel(t *testing.T) {
 	withoutRuleLabel.Labels = nil
 	ctrl.onConfigMapUpdate(rule, withoutRuleLabel)
 	assert.Empty(t, ctrl.model.GetRules())
+}
+
+func TestController_StoppingPublishingCancelsInFlightReconcile(t *testing.T) {
+	baseClient := k8sfake.NewSimpleClientset()
+	deviceClasses := &blockingDeviceClasses{
+		DeviceClassInterface: baseClient.ResourceV1().DeviceClasses(),
+		entered:              make(chan struct{}),
+		finished:             make(chan struct{}),
+	}
+	resourceClient := &blockingResourceClient{
+		ResourceV1Interface: baseClient.ResourceV1(),
+		deviceClasses:       deviceClasses,
+	}
+	client := &blockingKubeClient{
+		Interface: baseClient,
+		resource:  resourceClient,
+	}
+	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
+	addGPUAndNICTopology(ctrl)
+	ctrl.synced = true
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	go func() { _ = ctrl.RunWorker(workerCtx) }()
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	ctrl.SetPublishingContext(leaderCtx)
+	ctrl.EnqueueReconcile()
+	require.Eventually(t, func() bool {
+		select {
+		case <-deviceClasses.entered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		ctrl.SetPublishing(false)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stopping publishing did not cancel and drain reconciliation")
+	}
+	select {
+	case <-deviceClasses.finished:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight DeviceClass request continued after publishing stopped")
+	}
+
+	cancelWorker()
 }
 
 func TestController_Reconcile_AutoGroupingOverrideIsNotDiagnosedAsDuplicate(t *testing.T) {

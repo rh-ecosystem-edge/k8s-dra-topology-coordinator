@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,8 +65,12 @@ type Controller struct {
 	synced atomic.Bool
 
 	// workqueue triggers a full reconciliation when topology changes
-	workqueue  workqueue.TypedRateLimitingInterface[string]
-	publishing atomic.Bool
+	workqueue     workqueue.TypedRateLimitingInterface[string]
+	publishing    atomic.Bool
+	publishMu     sync.RWMutex
+	publishCtx    context.Context
+	publishCancel context.CancelFunc
+	reconcileWG   sync.WaitGroup
 }
 
 // NewController creates a new topology coordinator controller.
@@ -201,6 +206,7 @@ func (c *Controller) RunWorker(ctx context.Context) error {
 	klog.Info("Starting topology coordinator worker")
 	go c.runWorker(ctx)
 	<-ctx.Done()
+	c.StopPublishing()
 	c.workqueue.ShutDown()
 	klog.Info("Topology coordinator worker stopped")
 	return nil
@@ -208,10 +214,42 @@ func (c *Controller) RunWorker(ctx context.Context) error {
 
 // SetPublishing enables or disables DeviceClass publication for this replica.
 func (c *Controller) SetPublishing(enabled bool) {
-	c.publishing.Store(enabled)
 	if enabled {
-		c.EnqueueReconcile()
+		c.SetPublishingContext(context.Background())
+		return
 	}
+	c.StopPublishing()
+}
+
+// SetPublishingContext enables publication for one leadership epoch.
+func (c *Controller) SetPublishingContext(parent context.Context) {
+	c.StopPublishing()
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	publishCtx, cancel := context.WithCancel(parent)
+	c.publishMu.Lock()
+	c.publishCtx = publishCtx
+	c.publishCancel = cancel
+	c.publishing.Store(true)
+	c.publishMu.Unlock()
+	c.EnqueueReconcile()
+}
+
+// StopPublishing cancels the active leadership epoch and waits for any
+// reconciliation already using it to finish.
+func (c *Controller) StopPublishing() {
+	c.publishing.Store(false)
+	c.publishMu.Lock()
+	c.publishCtx = nil
+	cancel := c.publishCancel
+	c.publishCancel = nil
+	c.publishMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.reconcileWG.Wait()
 }
 
 // EnqueueReconcile requests a full reconciliation.
@@ -228,7 +266,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	if err := c.StartCache(ctx); err != nil {
 		return err
 	}
-	c.SetPublishing(true)
+	c.SetPublishingContext(ctx)
 	return c.RunWorker(ctx)
 }
 
@@ -245,7 +283,15 @@ func (c *Controller) runWorker(ctx context.Context) {
 			continue
 		}
 
-		if err := c.reconcile(ctx); err != nil {
+		reconcileCtx, ok := c.beginReconcile()
+		if !ok {
+			c.workqueue.Forget(key)
+			c.workqueue.Done(key)
+			continue
+		}
+		err := c.reconcile(reconcileCtx)
+		c.reconcileWG.Done()
+		if err != nil {
 			klog.Errorf("Reconciliation failed: %v", err)
 			c.workqueue.AddRateLimited(key)
 		} else {
@@ -253,6 +299,16 @@ func (c *Controller) runWorker(ctx context.Context) {
 		}
 		c.workqueue.Done(key)
 	}
+}
+
+func (c *Controller) beginReconcile() (context.Context, bool) {
+	c.publishMu.RLock()
+	defer c.publishMu.RUnlock()
+	if !c.publishing.Load() || c.publishCtx == nil {
+		return nil, false
+	}
+	c.reconcileWG.Add(1)
+	return c.publishCtx, true
 }
 
 // reconcile performs a full reconciliation: recompute partitions and sync DeviceClasses.
@@ -275,6 +331,9 @@ func (c *Controller) reconcile(ctx context.Context) error {
 	if !skipPartitions {
 		results := c.partitionBuilder.BuildPartitions()
 
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := c.classManager.SyncDeviceClasses(ctx, results); err != nil {
 			metrics.ReconciliationErrors.Inc()
 			return fmt.Errorf("failed to sync DeviceClasses: %w", err)
@@ -375,6 +434,9 @@ func (c *Controller) reconcile(ctx context.Context) error {
 			return fmt.Errorf("generated grouping DeviceClass name collision: %s", strings.Join(details, "; "))
 		}
 
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := c.classManager.SyncGroupingDeviceClasses(ctx, groupingResults); err != nil {
 			metrics.ReconciliationErrors.Inc()
 			return fmt.Errorf("failed to sync grouping DeviceClasses: %w", err)
