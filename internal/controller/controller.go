@@ -201,7 +201,7 @@ func (c *Controller) StartCache(ctx context.Context) error {
 }
 
 // RunWorker processes reconciliation events. Non-leaders keep their caches
-// current but skip publication until SetPublishing(true) is called.
+// current but skip publication until a leadership-scoped context is active.
 func (c *Controller) RunWorker(ctx context.Context) error {
 	klog.Info("Starting topology coordinator worker")
 	go c.runWorker(ctx)

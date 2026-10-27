@@ -50,6 +50,36 @@ type blockingDeviceClasses struct {
 	finished     chan struct{}
 }
 
+type epochBlockingDeviceClasses struct {
+	resourceclient.DeviceClassInterface
+	phaseMu    sync.Mutex
+	phase      int
+	firstOnce  sync.Once
+	secondOnce sync.Once
+	first      chan struct{}
+	second     chan struct{}
+}
+
+func (c *epochBlockingDeviceClasses) setPhase(phase int) {
+	c.phaseMu.Lock()
+	c.phase = phase
+	c.phaseMu.Unlock()
+}
+
+func (c *epochBlockingDeviceClasses) Get(ctx context.Context, name string, opts metav1.GetOptions) (*resourcev1.DeviceClass, error) {
+	c.phaseMu.Lock()
+	phase := c.phase
+	c.phaseMu.Unlock()
+	switch phase {
+	case 1:
+		c.firstOnce.Do(func() { close(c.first) })
+	case 2:
+		c.secondOnce.Do(func() { close(c.second) })
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (c *blockingDeviceClasses) Get(ctx context.Context, name string, opts metav1.GetOptions) (*resourcev1.DeviceClass, error) {
 	c.started.Do(func() { close(c.entered) })
 	<-ctx.Done()
@@ -227,6 +257,54 @@ func TestController_StoppingPublishingCancelsInFlightReconcile(t *testing.T) {
 		t.Fatal("in-flight DeviceClass request continued after publishing stopped")
 	}
 
+	cancelWorker()
+}
+
+func TestController_LeadershipHandoffUsesFreshContext(t *testing.T) {
+	baseClient := k8sfake.NewSimpleClientset()
+	deviceClasses := &epochBlockingDeviceClasses{
+		DeviceClassInterface: baseClient.ResourceV1().DeviceClasses(),
+		first:                make(chan struct{}),
+		second:               make(chan struct{}),
+	}
+	resourceClient := &blockingResourceClient{
+		ResourceV1Interface: baseClient.ResourceV1(),
+		deviceClasses:       deviceClasses,
+	}
+	client := &blockingKubeClient{Interface: baseClient, resource: resourceClient}
+	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
+	addGPUAndNICTopology(ctrl)
+	ctrl.synced = true
+
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	go func() { _ = ctrl.RunWorker(workerCtx) }()
+
+	deviceClasses.setPhase(1)
+	ctrl.SetPublishingContext(context.Background())
+	ctrl.EnqueueReconcile()
+	require.Eventually(t, func() bool {
+		select {
+		case <-deviceClasses.first:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	ctrl.StopPublishing()
+
+	deviceClasses.setPhase(2)
+	ctrl.SetPublishingContext(context.Background())
+	ctrl.EnqueueReconcile()
+	require.Eventually(t, func() bool {
+		select {
+		case <-deviceClasses.second:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	ctrl.StopPublishing()
 	cancelWorker()
 }
 
