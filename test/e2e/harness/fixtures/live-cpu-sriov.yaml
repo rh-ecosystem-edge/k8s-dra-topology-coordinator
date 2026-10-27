@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: live-cpu-sriov
+  namespace: default
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: live-cpu-sriov
+  mode: container
+  alignment: numaNode
+  displayName: Live CPU and SR-IOV smoke offering
+  description: Harness smoke grouping for the live DRA test node
+  intentLevel: capability
+  categories: live,smoke
+  workloadTypes: test
+  visibility: internal
+  devices: |
+    - class: dra.cpu
+      count: 1
+    - class: sriovnetwork.k8snetworkplumbingwg.io
+      count: 1

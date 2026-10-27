@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,13 +20,80 @@ import (
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
 
+func TestResolveEnvtestAssets_UsesVersionedDirectory(t *testing.T) {
+	base := t.TempDir()
+	versioned := filepath.Join(base, "1.34.1-linux-amd64")
+	require.NoError(t, os.MkdirAll(versioned, 0750))
+	for _, name := range []string{"etcd", "kube-apiserver", "kubectl"} {
+		require.NoError(t, os.WriteFile(filepath.Join(versioned, name), []byte("test"), 0600))
+	}
+
+	got, err := resolveEnvtestAssets(base)
+	require.NoError(t, err)
+	assert.Equal(t, versioned, got)
+}
+
+func TestResolveEnvtestAssets_UsesExactDirectory(t *testing.T) {
+	base := t.TempDir()
+	for _, name := range []string{"etcd", "kube-apiserver", "kubectl"} {
+		require.NoError(t, os.WriteFile(filepath.Join(base, name), []byte("test"), 0600))
+	}
+
+	got, err := resolveEnvtestAssets(base)
+	require.NoError(t, err)
+	assert.Equal(t, base, got)
+}
+
 func intPtr(v int64) *int64   { return &v }
 func strPtr(v string) *string { return &v }
+
+var envtestBinaries = []string{"etcd", "kube-apiserver", "kubectl"}
+
+func resolveEnvtestAssets(base string) (string, error) {
+	if hasEnvtestBinaries(base) {
+		return base, nil
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return "", fmt.Errorf("reading envtest assets directory %q: %w", base, err)
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(base, entry.Name())
+		if hasEnvtestBinaries(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("envtest binaries not found in %q; run make setup-envtest", base)
+}
+
+func hasEnvtestBinaries(dir string) bool {
+	for _, name := range envtestBinaries {
+		if info, err := os.Stat(filepath.Join(dir, name)); err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+func envtestAssetsDir() (string, error) {
+	if configured := os.Getenv("KUBEBUILDER_ASSETS"); configured != "" {
+		return resolveEnvtestAssets(configured)
+	}
+	base, err := envtest.SetupEnvtestDefaultBinaryAssetsDirectory()
+	if err != nil {
+		return "", err
+	}
+	return resolveEnvtestAssets(base)
+}
 
 func setupEnvtest(t *testing.T) (kubernetes.Interface, func()) {
 	t.Helper()
 
-	assetsDir, err := envtest.SetupEnvtestDefaultBinaryAssetsDirectory()
+	assetsDir, err := envtestAssetsDir()
 	require.NoError(t, err, "failed to find envtest binary assets directory")
 
 	testEnv := &envtest.Environment{
