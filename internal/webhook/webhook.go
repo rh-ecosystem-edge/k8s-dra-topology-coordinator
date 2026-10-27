@@ -33,9 +33,10 @@ const (
 // ClaimExpander is a mutating admission webhook that expands partition
 // ResourceClaims into multi-request claims with alignment constraints.
 type ClaimExpander struct {
-	client  kubernetes.Interface
-	decoder runtime.Decoder
-	model   *controller.TopologyModel
+	client     kubernetes.Interface
+	decoder    runtime.Decoder
+	model      *controller.TopologyModel
+	driverName string
 }
 
 // jsonPatch represents a single JSON Patch operation.
@@ -56,11 +57,20 @@ func (e *managedExpansionError) Unwrap() error { return e.err }
 // The model parameter is optional; when provided, it enables satisfiability
 // checks for "preferred" enforcement constraints.
 func NewClaimExpander(client kubernetes.Interface, model ...*controller.TopologyModel) *ClaimExpander {
+	return NewClaimExpanderWithDriver(client, driverName, model...)
+}
+
+// NewClaimExpanderWithDriver creates a ClaimExpander for the configured DRA driver.
+func NewClaimExpanderWithDriver(client kubernetes.Interface, configuredDriverName string, model ...*controller.TopologyModel) *ClaimExpander {
+	if configuredDriverName == "" {
+		configuredDriverName = driverName
+	}
 	scheme := runtime.NewScheme()
 	codecs := serializer.NewCodecFactory(scheme)
 	ce := &ClaimExpander{
-		client:  client,
-		decoder: codecs.UniversalDeserializer(),
+		client:     client,
+		decoder:    codecs.UniversalDeserializer(),
+		driverName: configuredDriverName,
 	}
 	if len(model) > 0 {
 		ce.model = model[0]
@@ -315,7 +325,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			if annotations == nil {
 				annotations = make(map[string]string)
 			}
-			annotations[driverName+"/expanded-requests"] = string(mapJSON)
+			annotations[controller.CoordinatorDriverName+"/expanded-requests"] = string(mapJSON)
 			if claim.Annotations == nil {
 				patches = append(patches, jsonPatch{
 					Op:    "add",
@@ -325,7 +335,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			} else {
 				patches = append(patches, jsonPatch{
 					Op:    "add",
-					Path:  "/metadata/annotations/" + escapeJSONPointer(driverName+"/expanded-requests"),
+					Path:  "/metadata/annotations/" + escapeJSONPointer(controller.CoordinatorDriverName+"/expanded-requests"),
 					Value: string(mapJSON),
 				})
 			}
@@ -561,13 +571,13 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 		}
 		return nil, true, &managedExpansionError{err: fmt.Errorf("failed to get DeviceClass %q: %w", deviceClassName, err)}
 	}
-	managed := dc.Labels[driverName+"/managed"] == "true"
+	managed := dc.Labels[controller.CoordinatorDriverName+"/managed"] == "true"
 
 	for _, cfg := range dc.Spec.Config {
 		if cfg.Opaque == nil {
 			continue
 		}
-		if cfg.Opaque.Driver != driverName {
+		if cfg.Opaque.Driver != ce.driverName {
 			continue
 		}
 
@@ -645,7 +655,7 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 				klog.V(4).Infof("Could not look up claim %s/%s for pod rewriting: %v", req.Namespace, claimName, err)
 				continue
 			}
-			annotation := claim.Annotations[driverName+"/expanded-requests"]
+			annotation := claim.Annotations[controller.CoordinatorDriverName+"/expanded-requests"]
 			if annotation == "" {
 				continue
 			}
@@ -957,7 +967,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		if err != nil {
 			continue
 		}
-		annotation := claim.Annotations[driverName+"/expanded-requests"]
+		annotation := claim.Annotations[controller.CoordinatorDriverName+"/expanded-requests"]
 		if annotation == "" {
 			continue
 		}

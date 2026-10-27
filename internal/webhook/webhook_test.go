@@ -490,6 +490,50 @@ func TestManagedDeviceClassWithoutPartitionConfigIsRejected(t *testing.T) {
 	assert.False(t, resp.Response.Allowed)
 }
 
+func TestCustomDriverNameExpandsManagedDeviceClass(t *testing.T) {
+	const customDriver = "example.coordinator"
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{{
+			DeviceClass: "gpu.example.com",
+			Count:       1,
+		}},
+	}
+	dc := makePartitionDeviceClass("custom-offering", partConfig)
+	dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+	dc.Spec.Config[0].Opaque.Driver = customDriver
+
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpanderWithDriver(client, customDriver)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+		}}}},
+	}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.True(t, resp.Response.Allowed)
+	assert.NotNil(t, resp.Response.PatchType)
+
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Response.Patch, &patches))
+	var requestsPatch *jsonPatch
+	for i := range patches {
+		if patches[i].Path == "/spec/devices/requests" {
+			requestsPatch = &patches[i]
+		}
+	}
+	require.NotNil(t, requestsPatch)
+	requestJSON, err := json.Marshal(requestsPatch.Value)
+	require.NoError(t, err)
+	var requests []resourcev1.DeviceRequest
+	require.NoError(t, json.Unmarshal(requestJSON, &requests))
+	require.Len(t, requests, 1)
+	assert.Equal(t, "gpu.example.com", requests[0].Exactly.DeviceClassName)
+}
+
 func TestDeviceClassLookupErrorIsRejected(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	client.PrependReactor("get", "deviceclasses", func(action k8stesting.Action) (bool, runtime.Object, error) {
