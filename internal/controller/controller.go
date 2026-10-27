@@ -449,6 +449,8 @@ func (c *Controller) onConfigMapAdd(obj interface{}) {
 		return
 	}
 	if cm.Labels[TopologyRuleLabel] != "true" {
+		c.ruleStore.RemoveConfigMap(cm.Namespace, cm.Name)
+		c.refreshModelRules()
 		return
 	}
 	if err := c.ruleStore.LoadFromConfigMap(cm); err != nil {
@@ -488,9 +490,6 @@ func (c *Controller) onConfigMapDelete(obj interface{}) {
 		if !ok {
 			return
 		}
-	}
-	if cm.Labels[TopologyRuleLabel] != "true" {
-		return
 	}
 	c.ruleStore.RemoveConfigMap(cm.Namespace, cm.Name)
 	c.refreshModelRules()

@@ -122,6 +122,23 @@ func TestController_TopologyRuleEventsRefreshModelWithoutReconcile(t *testing.T)
 	assert.Empty(t, ctrl.model.GetRules())
 }
 
+func TestController_TopologyRuleLabelRemovalClearsModel(t *testing.T) {
+	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModePartitions)
+	rule := makeTopologyRuleConfigMap("custom-rule", "default", map[string]string{
+		"attribute": "mock-device.example.com/numa",
+		"type":      "int",
+		"driver":    "mock-device.example.com",
+		"mapsTo":    "numaNode",
+	})
+	ctrl.onConfigMapAdd(rule)
+	require.Len(t, ctrl.model.GetRules(), 1)
+
+	withoutRuleLabel := rule.DeepCopy()
+	withoutRuleLabel.Labels = nil
+	ctrl.onConfigMapUpdate(rule, withoutRuleLabel)
+	assert.Empty(t, ctrl.model.GetRules())
+}
+
 func TestController_Reconcile_AutoGroupingOverrideIsNotDiagnosedAsDuplicate(t *testing.T) {
 	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModeGroupings)
 	addGPUAndNICTopology(ctrl)
