@@ -311,6 +311,46 @@ func TestPassthroughOfferingInjectsVFIO(t *testing.T) {
 	assert.True(t, foundConfig)
 }
 
+func TestPassthroughConfigsHaveStableOrder(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1, Passthrough: true},
+			{DeviceClass: "rdma.mellanox.com", Count: 1, Passthrough: true},
+		},
+	}
+	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-order", partConfig))
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+		Requests: []resourcev1.DeviceRequest{{Name: "partition", Exactly: &resourcev1.ExactDeviceRequest{
+			DeviceClassName: "vfio-order", Count: 1,
+		}}},
+	}}}
+
+	for i := 0; i < 20; i++ {
+		patches, err := expander.expandClaim(context.Background(), claim)
+		require.NoError(t, err)
+		var configPatch *jsonPatch
+		for j := range patches {
+			if patches[j].Path == "/spec/devices/config" {
+				configPatch = &patches[j]
+				break
+			}
+		}
+		require.NotNil(t, configPatch)
+		configJSON, err := json.Marshal(configPatch.Value)
+		require.NoError(t, err)
+		var configs []resourcev1.DeviceClaimConfiguration
+		require.NoError(t, json.Unmarshal(configJSON, &configs))
+		require.Len(t, configs, 2)
+		require.NotNil(t, configs[0].Opaque)
+		require.NotNil(t, configs[1].Opaque)
+		assert.Equal(t, "rdma.mellanox.com", configs[0].Opaque.Driver)
+		assert.Equal(t, "sriovnetwork.k8snetworkplumbingwg.io", configs[1].Opaque.Driver)
+	}
+}
+
 func TestPassthroughCountSplitsRequests(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",

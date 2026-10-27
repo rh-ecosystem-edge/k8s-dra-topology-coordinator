@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -271,7 +272,12 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 		}
 	}
 	var vfioConfigs []resourcev1.DeviceClaimConfiguration
+	passthroughDriverNames := make([]string, 0, len(passthroughDrivers))
 	for driver := range passthroughDrivers {
+		passthroughDriverNames = append(passthroughDriverNames, driver)
+	}
+	sort.Strings(passthroughDriverNames)
+	for _, driver := range passthroughDriverNames {
 		if existingConfigDrivers[driver] {
 			continue
 		}
