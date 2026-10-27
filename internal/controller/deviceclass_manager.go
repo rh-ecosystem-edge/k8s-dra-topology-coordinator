@@ -42,7 +42,10 @@ const (
 // PartitionConfig is the opaque configuration embedded in DeviceClass config.
 // It tells the webhook how to expand a partition claim into sub-resource requests.
 type PartitionConfig struct {
-	Kind         string              `json:"kind"`
+	Kind string `json:"kind"`
+	// Mode identifies whether this catalog offering is container-safe or
+	// explicitly intended for VM passthrough.
+	Mode         OfferingMode        `json:"mode,omitempty"`
 	SubResources []SubResourceConfig `json:"subResources"`
 	Alignments   []AlignmentConfig   `json:"alignments"`
 }
@@ -51,6 +54,9 @@ type PartitionConfig struct {
 type SubResourceConfig struct {
 	DeviceClass string `json:"deviceClass"`
 	Count       int    `json:"count"`
+	// Passthrough marks this subresource for VM passthrough handling when the
+	// enclosing offering is in passthrough mode.
+	Passthrough bool `json:"passthrough,omitempty"`
 	// Capacity specifies consumable capacity requests for shared devices.
 	// When set, the device is shared via DRAConsumableCapacity instead of
 	// exclusive allocation. The key is the capacity name (e.g., "dra.cpu/cpu"),
@@ -742,6 +748,7 @@ func (m *DeviceClassManager) buildDeviceClassFromCache(profile string, partType 
 func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representative PartitionDevice) (PartitionConfig, CouplingLevel) {
 	config := PartitionConfig{
 		Kind: "PartitionConfig",
+		Mode: OfferingModeContainer,
 	}
 
 	// Sub-resources: one entry per driver with its device count, optional capacity,
@@ -900,6 +907,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 func (m *DeviceClassManager) buildPartitionAggregateConfig(representative PartitionDevice) (PartitionConfig, CouplingLevel) {
 	config := PartitionConfig{
 		Kind: "PartitionConfig",
+		Mode: OfferingModeContainer,
 	}
 
 	for driver, count := range representative.DeviceCounts {
@@ -1190,6 +1198,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	type groupingAggregateState struct {
 		groupingName string
 		alignment    string
+		mode         OfferingMode
+		passthrough  map[string]bool
 		intent       IntentMetadata // identical across instances, per the note above
 		acc          *deviceIntersectionState
 		minRailIndex int
@@ -1203,9 +1213,14 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			state = &groupingAggregateState{
 				groupingName: name,
 				alignment:    entry.representative.Alignment,
+				mode:         entry.representative.Mode,
+				passthrough:  make(map[string]bool, len(entry.representative.PassthroughClasses)),
 				intent:       entry.representative.Intent,
 				acc:          newDeviceIntersectionState(),
 				minRailIndex: entry.representative.RailIndex,
+			}
+			for class, enabled := range entry.representative.PassthroughClasses {
+				state.passthrough[class] = enabled
 			}
 			aggStates[name] = state
 		}
@@ -1219,13 +1234,15 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	for name, state := range aggStates {
 		intersectedCounts, intersectedCap := state.acc.intersect(nil)
 		mergedRep := GroupingInstance{
-			GroupingName:   state.groupingName,
-			Alignment:      state.alignment,
-			Intent:         state.intent,
-			DeviceCounts:   intersectedCounts,
-			DeviceCapacity: intersectedCap,
-			Devices:        state.acc.devices,
-			RailIndex:      state.minRailIndex,
+			GroupingName:       state.groupingName,
+			Alignment:          state.alignment,
+			Mode:               state.mode,
+			PassthroughClasses: state.passthrough,
+			Intent:             state.intent,
+			DeviceCounts:       intersectedCounts,
+			DeviceCapacity:     intersectedCap,
+			Devices:            state.acc.devices,
+			RailIndex:          state.minRailIndex,
 		}
 		aggregates[name] = &groupingEntry{
 			representative: mergedRep,
@@ -1291,12 +1308,17 @@ func (m *DeviceClassManager) buildGroupingAggregateConfig(inst GroupingInstance)
 func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, includeNUMA bool) PartitionConfig {
 	config := PartitionConfig{
 		Kind: "PartitionConfig",
+		Mode: inst.Mode,
+	}
+	if config.Mode == "" {
+		config.Mode = OfferingModeContainer
 	}
 
 	for driverClass, count := range inst.DeviceCounts {
 		sr := SubResourceConfig{
 			DeviceClass: driverClass,
 			Count:       count,
+			Passthrough: config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
 		}
 
 		if cap, ok := inst.DeviceCapacity[driverClass]; ok {

@@ -191,6 +191,24 @@ data:
 
 `alignment` and `fallback` accept `pcieRoot`, `numaNode`, or `socket`. Device entries require `class` and a positive `count`; each entry may also provide a `capacity` map for consumable DRA capacity.
 
+Grouping offerings default to `mode: container`, which keeps ordinary Pod claims free of VM passthrough configuration. Set `mode: passthrough` and mark only the physical devices that should be exposed to a VM:
+
+```yaml
+data:
+  name: gpu-nic-vfio
+  mode: passthrough
+  alignment: pcieRoot
+  devices: |
+    - class: gpu.nvidia.com
+      count: 2
+      passthrough: true
+    - class: rdma.mellanox.com
+      count: 2
+      passthrough: true
+```
+
+Automatically generated partition classes remain container offerings. Passthrough is injected only for explicitly marked passthrough offerings.
+
 ### Intent-based offerings
 
 Grouping ConfigMaps may include these optional keys in `data` to describe an offering for discovery:

@@ -15,11 +15,21 @@ import (
 // DeviceGroupingLabel identifies ConfigMaps containing device grouping definitions.
 const DeviceGroupingLabel = "nodepartition.dra.k8s.io/device-grouping"
 
+// OfferingMode controls whether an offering is intended for ordinary
+// containers or explicit VM passthrough.
+type OfferingMode string
+
+const (
+	OfferingModeContainer   OfferingMode = "container"
+	OfferingModePassthrough OfferingMode = "passthrough"
+)
+
 // GroupingDevice specifies a device class and count within a grouping.
 type GroupingDevice struct {
-	Class    string            `json:"class"`
-	Count    int               `json:"count"`
-	Capacity map[string]string `json:"capacity,omitempty"`
+	Class       string            `json:"class"`
+	Count       int               `json:"count"`
+	Capacity    map[string]string `json:"capacity,omitempty"`
+	Passthrough bool              `json:"passthrough,omitempty"`
 }
 
 // IntentMetadata adds optional human-readable metadata to a device grouping.
@@ -49,6 +59,8 @@ type DeviceGrouping struct {
 	// Fallback is an optional looser alignment attribute to use when
 	// the preferred alignment is unsatisfiable for some device instances.
 	Fallback string
+	// Mode is the intended consumer mode for this offering.
+	Mode OfferingMode
 	// Devices lists the device classes and counts required in this grouping.
 	Devices []GroupingDevice
 	// Intent contains optional offering metadata from the source ConfigMap.
@@ -114,7 +126,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 	for _, g := range s.groupings {
 		devicesCopy := make([]GroupingDevice, len(g.Devices))
 		for i, d := range g.Devices {
-			gd := GroupingDevice{Class: d.Class, Count: d.Count}
+			gd := GroupingDevice{Class: d.Class, Count: d.Count, Passthrough: d.Passthrough}
 			if d.Capacity != nil {
 				gd.Capacity = make(map[string]string, len(d.Capacity))
 				for k, v := range d.Capacity {
@@ -130,6 +142,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 			Name:            g.Name,
 			Alignment:       g.Alignment,
 			Fallback:        g.Fallback,
+			Mode:            g.Mode,
 			Devices:         devicesCopy,
 			Intent:          intentCopy,
 			sourceConfigMap: g.sourceConfigMap,
@@ -140,6 +153,13 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 
 func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	g := DeviceGrouping{}
+	g.Mode = OfferingMode(cm.Data["mode"])
+	if g.Mode == "" {
+		g.Mode = OfferingModeContainer
+	}
+	if g.Mode != OfferingModeContainer && g.Mode != OfferingModePassthrough {
+		return g, fmt.Errorf("invalid mode %q: must be container or passthrough", g.Mode)
+	}
 
 	name := cm.Data["name"]
 	if name == "" {
