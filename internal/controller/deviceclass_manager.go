@@ -383,11 +383,13 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	}
 
 	// Create/update a DeviceClass for each profile+partitionType
+	activeNames := make(map[string]bool, len(seen))
 	for _, pp := range seen {
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, pp.cachedCoupling, pp.count)
 		if pp.partType == PartitionFull {
 			dc.Name = string(PartitionFull)
 		}
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish DeviceClass %s: %w", dc.Name, err))
 		}
@@ -467,6 +469,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	for _, pp := range aggregates {
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, CouplingNone, pp.count)
 		dc.Name = string(pp.partType)
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish aggregate DeviceClass %s: %w", dc.Name, err))
 		}
@@ -507,6 +510,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, aggRep, pp.cachedConfig, CouplingNone, pp.count)
 		dc.Name = tierName
 		dc.Labels[CoordinatorDriverName+"/tierName"] = tierName
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish tier DeviceClass %s: %w", dc.Name, err))
 		}
@@ -535,7 +539,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	for ak, tierName := range tierNames {
 		activeKeys[truncateLabel(ak.profile)+"-"+tierName] = true
 	}
-	if err := m.cleanupStaleDeviceClasses(ctx, activeKeys); err != nil {
+	if err := m.cleanupStaleDeviceClasses(ctx, activeKeys, activeNames); err != nil {
 		klog.Errorf("Failed to cleanup stale DeviceClasses: %v", err)
 	}
 
@@ -649,7 +653,7 @@ func countPCIeRootsInNUMA(partitions []PartitionDevice, profile string, numaNode
 }
 
 // cleanupStaleDeviceClasses removes DeviceClasses that no longer match any partition.
-func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, active map[string]bool) error {
+func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, activeKeys, activeNames map[string]bool) error {
 	labelSelector := fmt.Sprintf("%s/managed=true,%s/partitionType", CoordinatorDriverName, CoordinatorDriverName)
 	classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -659,6 +663,9 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 	}
 
 	for _, dc := range classes.Items {
+		if activeNames[dc.Name] {
+			continue
+		}
 		profile := dc.Labels[CoordinatorDriverName+"/profile"]
 		partType := dc.Labels[CoordinatorDriverName+"/partitionType"]
 		tierName := dc.Labels[CoordinatorDriverName+"/tierName"]
@@ -679,7 +686,7 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 				key += "-" + coupling
 			}
 		}
-		if _, exists := active[key]; !exists {
+		if _, exists := activeKeys[key]; !exists {
 			if err := m.client.ResourceV1().DeviceClasses().Delete(ctx, dc.Name, metav1.DeleteOptions{}); err != nil {
 				if !errors.IsNotFound(err) {
 					klog.Errorf("Failed to delete stale DeviceClass %s: %v", dc.Name, err)

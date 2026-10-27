@@ -227,6 +227,50 @@ func TestDeviceClassManager_SyncDeviceClasses_RejectsSanitizedPCIeRootCollision(
 	assert.Empty(t, classes.Items)
 }
 
+func TestDeviceClassManager_SyncDeviceClasses_RemovesStalePCIeRootByName(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	partition := func(root string) PartitionDevice {
+		return PartitionDevice{
+			Name:         "node-1-" + root,
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			PCIeRoots:    []string{root},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}
+	}
+	first := []PartitionResult{{
+		NodeName:   "node-1",
+		Profile:    "gpu.example.com",
+		Partitions: []PartitionDevice{partition("pci0000:00"), partition("pci0000:01")},
+	}}
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), first))
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	var staleName, activeName string
+	for _, dc := range classes.Items {
+		if strings.Contains(dc.Name, "pci0000-01") {
+			staleName = dc.Name
+		}
+		if strings.Contains(dc.Name, "pci0000-00") {
+			activeName = dc.Name
+		}
+	}
+	require.NotEmpty(t, staleName)
+	require.NotEmpty(t, activeName)
+
+	second := []PartitionResult{{
+		NodeName:   "node-1",
+		Profile:    "gpu.example.com",
+		Partitions: []PartitionDevice{partition("pci0000:00")},
+	}}
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), second))
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), staleName, metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), activeName, metav1.GetOptions{})
+	assert.NoError(t, err)
+}
+
 func TestDeviceClassManager_DeviceClassContents(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	rules := NewTopologyRuleStore()
