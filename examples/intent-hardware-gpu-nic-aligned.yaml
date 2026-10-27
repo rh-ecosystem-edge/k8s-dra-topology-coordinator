@@ -6,6 +6,7 @@ metadata:
     nodepartition.dra.k8s.io/device-grouping: "true"
 data:
   name: gpu-nic-aligned
+  rail: "true"
   alignment: pcieRoot
   fallback: numaNode
   devices: |

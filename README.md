@@ -180,6 +180,7 @@ metadata:
     nodepartition.dra.k8s.io/device-grouping: "true"
 data:
   name: gpu-nic-pair
+  rail: "true"
   alignment: pcieRoot
   fallback: numaNode
   devices: |
@@ -189,7 +190,9 @@ data:
       count: 1
 ```
 
-`alignment` and `fallback` accept `pcieRoot`, `numaNode`, or `socket`. Device entries require `class` and a positive `count`; each entry may also provide a `capacity` map for consumable DRA capacity.
+`alignment` and `fallback` accept `pcieRoot`, `numaNode`, or `socket`. Device entries require `class` and a positive `count`; each entry may also provide a `capacity` map for consumable DRA capacity. Set `rail: "true"` only for an explicit GPU+NIC offering that must be satisfied on one PCIe root. Rail offerings must use `pcieRoot` alignment and exactly two device entries with `count: 1`; the coordinator treats the device classes as the operator-declared GPU and NIC pair and does not infer rail intent from class names.
+
+The aggregate DeviceClass keeps the grouping name. Explicit rail instances are named `<grouping>-rail<N>` and carry the `railIndex` label. Ordinary grouping instances retain their locality meaning in the name, such as `<grouping>-numa<N>`, `<grouping>-pcie-<root>`, or `<grouping>-socket<N>`, and do not carry `railIndex`. This is a breaking rename for previously generated non-rail `-rail<N>` classes; update claims to the new topology-specific names.
 
 Grouping offerings default to `mode: container`, which keeps ordinary Pod claims free of VM passthrough configuration. Set `mode: passthrough` and mark only the physical devices that should be exposed to a VM:
 
@@ -224,7 +227,7 @@ Grouping ConfigMaps may include these optional keys in `data` to describe an off
 
 All six metadata keys are optional, so valid existing grouping ConfigMaps need no metadata changes. The required `data.name` must sanitize to a DNS-1123 label of at most 56 characters; validation may reject older invalid or overlong names. The 63-code-point `displayName` cap and 1024-code-point `description` cap are project policies, not Kubernetes API limits. `categories` and `workloadTypes` are split on commas, trimmed, emptied values dropped, and duplicates removed while retaining first-seen order. Each list accepts at most 16 unique entries of at most 63 Unicode code points; the published annotation joins those entries with commas.
 
-Intent labels and annotations appear on aggregate DeviceClasses for user-defined groupings. Per-rail and auto-detected grouping classes do not receive intent metadata. `visibility` is published only when explicitly set. Discover matching classes with labels:
+Intent labels and annotations appear on aggregate DeviceClasses for user-defined groupings. Per-instance and auto-detected grouping classes do not receive intent metadata. `visibility` is published only when explicitly set. Discover matching classes with labels:
 
 ```sh
 kubectl get deviceclasses -l nodepartition.dra.k8s.io/intent-level=workload
@@ -235,7 +238,7 @@ kubectl get deviceclasses -l nodepartition.dra.k8s.io/visibility=public \
 
 `categories` and `workloadTypes` are comma-joined annotations, so Kubernetes label selectors cannot query those values. Intent metadata currently supports discovery and cataloging only; request-level claim rejection based on categories or workload types is deferred, and the webhook expands claims from the DeviceClass scheduling configuration independently of these annotations.
 
-If a grouping ConfigMap update is invalid, the coordinator retains the last valid cached grouping and logs that its metadata may be stale until a valid update arrives. If distinct `data.name` values sanitize to the same DeviceClass name, or their emitted aggregate/per-rail names overlap (for example, `gpu` emits `gpu-rail0` while another grouping's aggregate is `gpu-rail0`), grouping publication pauses to preserve the last successfully published classes; other grouping updates wait until the conflict is corrected.
+If a grouping ConfigMap update is invalid, the coordinator retains the last valid cached grouping and logs that its metadata may be stale until a valid update arrives. If distinct `data.name` values sanitize to the same DeviceClass name, or their emitted aggregate/per-instance names overlap (for example, an explicit `gpu` rail emits `gpu-rail0` while another grouping's aggregate is `gpu-rail0`), grouping publication pauses to preserve the last successfully published classes; other grouping updates wait until the conflict is corrected.
 
 Example ConfigMaps:
 
