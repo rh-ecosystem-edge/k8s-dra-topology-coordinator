@@ -129,6 +129,72 @@ func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
 	}
 }
 
+func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{{
+			Name:         "node-1-pcie-0",
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			NUMANodes:    []int64{0},
+			PCIeRoots:    []string{"pci0000:00"},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}},
+	}}
+
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	for _, dc := range classes.Items {
+		if dc.Labels[CoordinatorDriverName+"/partitionType"] != string(PartitionPCIeRoot) {
+			continue
+		}
+		assert.NotContains(t, dc.Name, "-rail")
+		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/railIndex")
+	}
+}
+
+func TestDeviceClassManager_SyncDeviceClasses_RequiresLegacyPartitionRailMigration(t *testing.T) {
+	legacy := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-example-com-pcieroot-numa0-pci0000-00-loose-rail0",
+			Labels: map[string]string{
+				CoordinatorDriverName + "/managed":       "true",
+				CoordinatorDriverName + "/profile":       "gpu.example.com",
+				CoordinatorDriverName + "/partitionType": string(PartitionPCIeRoot),
+				CoordinatorDriverName + "/numa":          "numa0-pci0000-00",
+				CoordinatorDriverName + "/coupling":      string(CouplingLoose),
+				CoordinatorDriverName + "/railIndex":     "0",
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(legacy)
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{{
+			Name:         "node-1-pcie-0",
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			NUMANodes:    []int64{0},
+			PCIeRoots:    []string{"pci0000:00"},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}},
+	}}
+
+	err := manager.SyncDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy fixed-partition rail DeviceClass")
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	require.NoError(t, client.ResourceV1().DeviceClasses().Delete(context.Background(), legacy.Name, metav1.DeleteOptions{}))
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
+}
+
 func TestDeviceClassManager_DeviceClassContents(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	rules := NewTopologyRuleStore()
@@ -1301,8 +1367,9 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_RemovesLegacyRailNameForNo
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "gpu-nic-pair-rail0",
 			Labels: map[string]string{
-				CoordinatorDriverName + "/managed":  "true",
-				CoordinatorDriverName + "/grouping": "gpu-nic-pair",
+				CoordinatorDriverName + "/managed":   "true",
+				CoordinatorDriverName + "/grouping":  "gpu-nic-pair",
+				CoordinatorDriverName + "/railIndex": "0",
 			},
 		},
 	}
@@ -1316,13 +1383,19 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_RemovesLegacyRailNameForNo
 		DeviceCounts:  map[string]int{"gpu.example.com": 1},
 	}
 
-	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
+	results := []GroupingResult{{
 		NodeName:  "node-1",
 		Instances: []GroupingInstance{nonRail},
-	}}))
+	}}
 
-	_, err := client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
-	assert.Error(t, err)
+	err := manager.SyncGroupingDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy non-rail grouping DeviceClass")
+
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	require.NoError(t, client.ResourceV1().DeviceClasses().Delete(context.Background(), legacy.Name, metav1.DeleteOptions{}))
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), results))
 	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair-numa0", metav1.GetOptions{})
 	assert.NoError(t, err)
 }

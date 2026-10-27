@@ -351,38 +351,27 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 		}
 	}
 
-	// Compute rail indices for pcieroot partitions based on sorted PCIe root
-	// address. Uses the first PCIeRoot from each partition's representative,
-	// matching the sort order used by the grouping builder for gpu-nic-pair.
-	type pcieRootEntry struct {
-		key      string
-		pcieRoot string
-	}
-	var pcieRootEntries []pcieRootEntry
-	for key, pp := range seen {
-		if pp.partType == PartitionPCIeRoot && len(pp.representative.PCIeRoots) > 0 {
-			pcieRootEntries = append(pcieRootEntries, pcieRootEntry{key: key, pcieRoot: pp.representative.PCIeRoots[0]})
-		}
-	}
-	sort.Slice(pcieRootEntries, func(i, j int) bool {
-		return pcieRootEntries[i].pcieRoot < pcieRootEntries[j].pcieRoot
+	// Fixed PCIe partition classes also stopped using the reserved -railN
+	// naming. Hold the old class in place until an operator removes it, so an
+	// upgrade cannot delete a class still referenced by claims.
+	classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s/managed=true,%s/partitionType", CoordinatorDriverName, CoordinatorDriverName),
 	})
-	pcieRootRailIndex := make(map[string]int)
-	for i, entry := range pcieRootEntries {
-		pcieRootRailIndex[entry.key] = i
+	if err != nil {
+		return fmt.Errorf("failed to check legacy partition DeviceClasses: %w", err)
+	}
+	for _, dc := range classes.Items {
+		if dc.Labels[CoordinatorDriverName+"/partitionType"] == string(PartitionPCIeRoot) &&
+			dc.Labels[CoordinatorDriverName+"/railIndex"] != "" {
+			return fmt.Errorf("legacy fixed-partition rail DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
+		}
 	}
 
 	// Create/update a DeviceClass for each profile+partitionType
-	for key, pp := range seen {
+	for _, pp := range seen {
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, pp.cachedCoupling, pp.count)
 		if pp.partType == PartitionFull {
 			dc.Name = string(PartitionFull)
-		}
-		if pp.partType == PartitionPCIeRoot {
-			if rail, ok := pcieRootRailIndex[key]; ok {
-				dc.Labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", rail)
-				dc.Name = fmt.Sprintf("%s-rail%d", dc.Name, rail)
-			}
 		}
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish DeviceClass %s: %w", dc.Name, err))
@@ -1166,6 +1155,34 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 					config:         config,
 					count:          1,
 				}
+			}
+		}
+	}
+
+	// Non-rail instance names changed from the historical -railN form to
+	// topology-specific names. Refuse an in-place upgrade while an old class
+	// remains, so claims keep their old target until the operator removes the
+	// legacy classes and explicitly crosses the migration boundary.
+	nonRailGroupings := make(map[string]struct{})
+	for _, entry := range seen {
+		if !entry.representative.Rail {
+			nonRailGroupings[entry.representative.GroupingName] = struct{}{}
+		}
+	}
+	if len(nonRailGroupings) > 0 {
+		classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s/managed=true,%s/grouping", CoordinatorDriverName, CoordinatorDriverName),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to check legacy grouping DeviceClasses: %w", err)
+		}
+		for _, dc := range classes.Items {
+			if _, ok := nonRailGroupings[dc.Labels[CoordinatorDriverName+"/grouping"]]; !ok {
+				continue
+			}
+			prefix := sanitizeForName(dc.Labels[CoordinatorDriverName+"/grouping"]) + "-rail"
+			if dc.Labels[CoordinatorDriverName+"/railIndex"] != "" && strings.HasPrefix(dc.Name, prefix) {
+				return fmt.Errorf("legacy non-rail grouping DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
 			}
 		}
 	}
