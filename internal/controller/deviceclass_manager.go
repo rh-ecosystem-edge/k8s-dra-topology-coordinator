@@ -1318,7 +1318,7 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 		sr := SubResourceConfig{
 			DeviceClass: driverClass,
 			Count:       count,
-			Passthrough: inst.PassthroughClasses[driverClass],
+			Passthrough: config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
 		}
 
 		if cap, ok := inst.DeviceCapacity[driverClass]; ok {

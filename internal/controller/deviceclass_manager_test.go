@@ -1124,6 +1124,22 @@ func TestDeviceClassManager_GroupingConfigCarriesPassthroughMode(t *testing.T) {
 	}
 }
 
+func TestDeviceClassManager_ContainerGroupingDoesNotCarryPassthrough(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	instance := multiDeviceGroupingInstance(0)
+	instance.Mode = OfferingModeContainer
+	instance.PassthroughClasses = map[string]bool{
+		"gpu.nvidia.com": true,
+	}
+
+	config := manager.buildGroupingConfig(instance)
+	assert.Equal(t, OfferingModeContainer, config.Mode)
+	for _, sr := range config.SubResources {
+		assert.False(t, sr.Passthrough, sr.DeviceClass)
+	}
+}
+
 func TestDeviceClassManager_GroupingAggregateCarriesPassthroughMode(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
