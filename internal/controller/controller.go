@@ -289,8 +289,10 @@ func (c *Controller) runWorker(ctx context.Context) {
 			c.workqueue.Done(key)
 			continue
 		}
-		err := c.reconcile(reconcileCtx)
-		c.reconcileWG.Done()
+		err := func() error {
+			defer c.reconcileWG.Done()
+			return c.reconcile(reconcileCtx)
+		}()
 		if err != nil {
 			klog.Errorf("Reconciliation failed: %v", err)
 			c.workqueue.AddRateLimited(key)
