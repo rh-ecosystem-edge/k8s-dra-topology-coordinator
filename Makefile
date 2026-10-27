@@ -1,6 +1,6 @@
 # Makefile for Node Partition Topology Coordinator
 
-.PHONY: build test test-coverage lint setup-envtest clean deps fmt vet dev
+.PHONY: build test test-coverage lint setup-envtest e2e clean deps fmt vet dev
 
 # Build variables
 BINARY_DIR=bin
@@ -34,6 +34,10 @@ lint:
 # Setup envtest binaries
 setup-envtest:
 	$(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest use -p path --arch $(GOARCH) 1.34
+
+# Run live E2E profiles against an explicitly disposable Kubernetes cluster.
+e2e:
+	./test/e2e/run-e2e.sh
 
 # Clean build artifacts
 clean:

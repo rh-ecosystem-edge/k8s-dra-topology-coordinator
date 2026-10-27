@@ -18,6 +18,10 @@ spec:
     - ports:
         - port: {{ .Values.controller.healthPort }}
           protocol: TCP
+    # Allow the Kubernetes API server to reach the admission webhook
+    - ports:
+        - port: {{ .Values.controller.webhook.port }}
+          protocol: TCP
   egress:
     # Allow DNS
     - ports:

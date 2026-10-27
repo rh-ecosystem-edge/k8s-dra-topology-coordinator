@@ -250,7 +250,7 @@ The coordinator can work with any DRA driver that publishes usable topology info
 The repository's E2E workflow exercises:
 
 - [mock-device](https://github.com/fabiendupont/mock-device) as the required mock accelerator driver; and
-- [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu) as an optional CPU driver in individual mode.
+- [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu) as an optional CPU driver in individual mode; it is required by the E2E `cross-driver` profile.
 
 Other drivers require their actual `ResourceSlice` driver names, DeviceClass names, attribute types, and topology attributes to be configured in rules. The coordinator does not assume a universal vendor attribute naming scheme.
 
@@ -355,7 +355,10 @@ The registered controller metrics are:
 
 ## End-to-end testing
 
-See [`test/e2e/README.md`](test/e2e/README.md) for cluster setup, image loading, topology rule deployment, and validation with mock-device and dra-driver-cpu.
+See [`test/e2e/README.md`](test/e2e/README.md) for the disposable-cluster contract,
+profile selection, TLS settings, and validation with mock-device and dra-driver-cpu.
+Run `E2E_KUBECONFIG=/path/to/kubeconfig E2E_DISPOSABLE_CLUSTER=1 make e2e` only
+against a cluster dedicated to the test run.
 
 ## Contributing
 

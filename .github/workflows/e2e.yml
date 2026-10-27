@@ -1,0 +1,35 @@
+name: Live E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    # The runner must provide a disposable Kubernetes 1.34+ cluster with DRA,
+    # mock-device, dra-driver-cpu, Helm, kubectl, and E2E_KUBECONFIG.
+    runs-on: [self-hosted, linux, dra-e2e]
+    env:
+      E2E_PROFILE: full
+      E2E_DISPOSABLE_CLUSTER: "1"
+      E2E_REQUIRE_CPU: "1"
+      E2E_DRIVER_NAME: e2e.coordinator.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Verify disposable-cluster credentials
+        run: test -n "${E2E_KUBECONFIG:-}"
+
+      - name: Compile tagged E2E suite
+        run: go test -tags=e2e ./test/e2e -count=1
+
+      - name: Run live E2E
+        run: make e2e
