@@ -1645,6 +1645,72 @@ func TestHandleVMIAdmission_UsesUniqueRequestsForPassthroughCount(t *testing.T) 
 	assert.NotEqual(t, requestNames[0], requestNames[1])
 }
 
+func TestHandleVMIAdmission_DoesNotSplitCapacityBackedPassthrough(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{{
+			DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io",
+			Count:       2,
+			Capacity:    map[string]string{"ports": "2"},
+			Passthrough: true,
+		}},
+	}
+	partClass := makePartitionDeviceClass("vfio-capacity", partConfig)
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "vfio-capacity-tpl", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name:    "partition",
+				Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-capacity", Count: 1},
+			}}},
+		}},
+	}
+	client := fake.NewSimpleClientset(partClass, claimTemplate)
+	expander := NewClaimExpander(client)
+	vmi := map[string]interface{}{
+		"apiVersion": "kubevirt.io/v1",
+		"kind":       "VirtualMachineInstance",
+		"metadata":   map[string]interface{}{"name": "capacity-vmi", "namespace": "default"},
+		"spec": map[string]interface{}{
+			"resourceClaims": []interface{}{map[string]interface{}{
+				"name": "partition", "resourceClaimTemplateName": "vfio-capacity-tpl",
+			}},
+			"domain": map[string]interface{}{"devices": map[string]interface{}{}},
+		},
+	}
+	vmiJSON, err := json.Marshal(vmi)
+	require.NoError(t, err)
+	resp := expander.handleVMIAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "capacity-vmi-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: vmiJSON},
+	})
+	require.True(t, resp.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
+	var requestNames []string
+	for _, patch := range patches {
+		if !strings.Contains(patch.Path, "hostDevices") {
+			continue
+		}
+		devices := []interface{}{patch.Value}
+		if value, ok := patch.Value.([]interface{}); ok {
+			devices = value
+		}
+		for _, value := range devices {
+			if device, ok := value.(map[string]interface{}); ok {
+				if name, ok := device["requestName"].(string); ok {
+					requestNames = append(requestNames, name)
+				}
+			}
+		}
+	}
+	require.Equal(t, []string{"partition-sriovnetwork-k8snetworkplumbingwg-io"}, requestNames)
+}
+
 func TestEscapeJSONPointer(t *testing.T) {
 	assert.Equal(t, "a~1b", escapeJSONPointer("a/b"))
 	assert.Equal(t, "a~0b", escapeJSONPointer("a~b"))

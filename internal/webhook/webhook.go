@@ -866,11 +866,15 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 					} else if strings.Contains(lc, "net") || strings.Contains(lc, "sriov") || strings.Contains(lc, "rdma") {
 						hint = "nic"
 					}
+					splitCount := sr.Count
+					if len(sr.Capacity) > 0 || splitCount <= 1 {
+						splitCount = 1
+					}
 					passthroughDevices = append(passthroughDevices, struct {
 						class    string
 						nameHint string
 						srCount  int
-					}{sr.DeviceClass, hint, sr.Count})
+					}{sr.DeviceClass, hint, splitCount})
 				}
 			}
 
