@@ -1412,6 +1412,11 @@ func TestHandleVMIAdmission_RejectsMissingTemplate(t *testing.T) {
 			"resourceClaims": []interface{}{map[string]interface{}{
 				"name": "partition", "resourceClaimTemplateName": "missing-template",
 			}},
+			"domain": map[string]interface{}{"devices": map[string]interface{}{
+				"hostDevices": []interface{}{map[string]interface{}{
+					"name": "nic0", "claimName": "partition", "requestName": "partition",
+				}},
+			}},
 		},
 	}
 	vmiJSON, err := json.Marshal(vmi)
@@ -1424,6 +1429,60 @@ func TestHandleVMIAdmission_RejectsMissingTemplate(t *testing.T) {
 		Object:    runtime.RawExtension{Raw: vmiJSON},
 	})
 	assert.False(t, resp.Allowed)
+}
+
+func TestHandleVMIAdmission_RewritesExistingTemplateHostDevice(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind:         "PartitionConfig",
+		Mode:         controller.OfferingModeContainer,
+		SubResources: []controller.SubResourceConfig{{DeviceClass: "rdma.mellanox.com", Count: 1}},
+	}
+	partClass := makePartitionDeviceClass("template-offering", partConfig)
+	templateName := "template-offering-tpl"
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name:    "partition",
+				Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "template-offering", Count: 1},
+			}}},
+		}},
+	}
+	client := fake.NewSimpleClientset(partClass, template)
+	expander := NewClaimExpander(client)
+	vmi := map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "template-vmi"},
+		"spec": map[string]interface{}{
+			"resourceClaims": []interface{}{map[string]interface{}{
+				"name": "partition-claim", "resourceClaimTemplateName": templateName,
+			}},
+			"domain": map[string]interface{}{"devices": map[string]interface{}{
+				"hostDevices": []interface{}{map[string]interface{}{
+					"name": "nic0", "claimName": "partition-claim", "requestName": "partition",
+				}},
+			}},
+		},
+	}
+	vmiJSON, err := json.Marshal(vmi)
+	require.NoError(t, err)
+	resp := expander.handleVMIAdmission(context.Background(), &admissionv1.AdmissionRequest{
+		UID:       "template-vmi-uid",
+		Namespace: "default",
+		Resource:  metav1.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachineinstances"},
+		Operation: admissionv1.Create,
+		Object:    runtime.RawExtension{Raw: vmiJSON},
+	})
+	require.True(t, resp.Allowed)
+	var patches []jsonPatch
+	require.NoError(t, json.Unmarshal(resp.Patch, &patches))
+	var rewritten bool
+	for _, patch := range patches {
+		if strings.HasSuffix(patch.Path, "/hostDevices/0/requestName") {
+			rewritten = true
+			assert.Equal(t, "partition-rdma-mellanox-com", patch.Value)
+		}
+	}
+	assert.True(t, rewritten)
 }
 
 func TestHandleVMIAdmission_GeneratesHostDevices(t *testing.T) {

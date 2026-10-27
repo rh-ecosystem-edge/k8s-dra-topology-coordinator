@@ -784,6 +784,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	existingHostDevices := nestedSlice(vmi, "spec", "domain", "devices", "hostDevices")
 	hdIdx := len(existingHostDevices)
 	globalDevIdx := 0
+	templateMappings := make(map[string]map[string][]string)
 
 	// For each resourceClaim referencing a template, look up the template's
 	// DeviceClass config and auto-generate hostDevices if none exist for it.
@@ -798,6 +799,20 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 			continue
 		}
 
+		// Resolve every template before deciding whether to generate devices.
+		// Existing devices still need the template mapping for request rewrites.
+		tpl, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
+		if err != nil {
+			return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
+		}
+		mapping, err := ce.expansionMapping(ctx, tpl.Spec.Spec.Devices.Requests)
+		if err != nil {
+			return denyResponse(fmt.Sprintf("failed to expand ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
+		}
+		if len(mapping) > 0 {
+			templateMappings[rcName] = mapping
+		}
+
 		// Check if the VMI already has hostDevices for this claim
 		hasDevices := false
 		for _, hd := range existingHostDevices {
@@ -809,12 +824,6 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		}
 		if hasDevices {
 			continue
-		}
-
-		// Look up the ResourceClaimTemplate
-		tpl, err := ce.client.ResourceV1().ResourceClaimTemplates(req.Namespace).Get(ctx, templateName, metav1.GetOptions{})
-		if err != nil {
-			return denyResponse(fmt.Sprintf("failed to get ResourceClaimTemplate %s/%s: %v", req.Namespace, templateName, err))
 		}
 		// Find the partition request and its DeviceClass
 		for _, tplReq := range tpl.Spec.Spec.Devices.Requests {
@@ -934,6 +943,10 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 		}
 		claimName, _ := rcMap["resourceClaimName"].(string)
 		if claimName == "" {
+			claimName, _ = rcMap["name"].(string)
+			if mapping := templateMappings[claimName]; len(mapping) > 0 {
+				expansionMap[claimName] = mapping
+			}
 			continue
 		}
 		claim, err := ce.client.ResourceV1().ResourceClaims(req.Namespace).Get(ctx, claimName, metav1.GetOptions{})
