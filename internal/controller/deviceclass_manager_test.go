@@ -1296,6 +1296,37 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_NoIntentMetadata(t *testin
 	}
 }
 
+func TestDeviceClassManager_SyncGroupingDeviceClasses_RemovesLegacyRailNameForNonRail(t *testing.T) {
+	legacy := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-nic-pair-rail0",
+			Labels: map[string]string{
+				CoordinatorDriverName + "/managed":  "true",
+				CoordinatorDriverName + "/grouping": "gpu-nic-pair",
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(legacy)
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	nonRail := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "numaNode",
+		NUMANodes:     []int64{0},
+		InstanceIndex: 0,
+		DeviceCounts:  map[string]int{"gpu.example.com": 1},
+	}
+
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
+		NodeName:  "node-1",
+		Instances: []GroupingInstance{nonRail},
+	}}))
+
+	_, err := client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair-numa0", metav1.GetOptions{})
+	assert.NoError(t, err)
+}
+
 func TestDeviceClassManager_SyncGroupingDeviceClasses_AutoDetectedHasNoIntentMetadata(t *testing.T) {
 	model := NewTopologyModel()
 	nodeTopo := &NodeTopology{
@@ -1320,6 +1351,8 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AutoDetectedHasNoIntentMet
 	require.NoError(t, err)
 	require.NotEmpty(t, classes.Items)
 	for _, dc := range classes.Items {
+		assert.NotContains(t, dc.Name, "-rail")
+		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/railIndex")
 		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/intent-level")
 		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/visibility")
 		assert.NotContains(t, dc.Annotations, CoordinatorDriverName+"/display-name")

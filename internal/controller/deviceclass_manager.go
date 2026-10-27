@@ -1288,7 +1288,10 @@ func groupingInstanceKey(inst GroupingInstance) string {
 	pk := strings.Join(inst.PCIeRoots, "-")
 	key := truncateLabel(inst.GroupingName) + "-" + sanitizeForName(inst.Alignment)
 	if pk != "" {
-		key += "-" + sanitizeForName(pk)
+		// Keep the raw topology value in the internal key. The published
+		// DeviceClass name is sanitized separately, so two distinct roots that
+		// normalize to the same DNS label remain distinguishable here.
+		key += "-" + pk
 	} else if nk != "" {
 		key += "-numa" + nk
 	}
