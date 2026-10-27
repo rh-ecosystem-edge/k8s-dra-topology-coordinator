@@ -408,13 +408,14 @@ func TestController_Reconcile_GeneratedNameCollisionPreservesExistingDeviceClass
 	}
 	client := k8sfake.NewSimpleClientset(existing)
 	ctrl := NewController(client, CoordinatorDriverName, PartitionModeGroupings)
-	ctrl.Model().UpdateFromResourceSlice(makeResourceSlice("gpu-slice", "gpu.nvidia.com", "node-1", "gpu-pool", []resourcev1.Device{
-		makeGPUDevice("gpu-0", 0, "pcie-0"),
-	}))
+	addGPUAndNICTopology(ctrl)
 
 	for _, groupingName := range []string{"gpu", "gpu-rail0"} {
 		data := validGroupingData(groupingName)
-		data["devices"] = "- class: gpu.nvidia.com\n  count: 1"
+		data["devices"] = "- class: gpu.nvidia.com\n  count: 1\n- class: rdma.mellanox.com\n  count: 1"
+		if groupingName == "gpu" {
+			data["rail"] = "true"
+		}
 		if groupingName == "gpu-rail0" {
 			data["intentLevel"] = "workload"
 		}
@@ -433,6 +434,26 @@ func TestController_Reconcile_GeneratedNameCollisionPreservesExistingDeviceClass
 	require.NoError(t, getErr)
 	assert.Equal(t, existing.Labels, after.Labels)
 	assert.Equal(t, existing.Annotations, after.Annotations)
+}
+
+func TestDetectGroupingDeviceClassNameCollisions_DistinguishesInstancesWithinGrouping(t *testing.T) {
+	results := []GroupingResult{{Instances: []GroupingInstance{
+		{
+			GroupingName:  "gpu-nic-pair",
+			Alignment:     "pcieRoot",
+			PCIeRoots:     []string{"pci:0000:00"},
+			InstanceIndex: 0,
+		},
+		{
+			GroupingName:  "gpu-nic-pair",
+			Alignment:     "pcieRoot",
+			PCIeRoots:     []string{"pci-0000:00"},
+			InstanceIndex: 1,
+		},
+	}}}
+
+	collisions := detectGroupingDeviceClassNameCollisions(results)
+	assert.Contains(t, collisions, "gpu-nic-pair-pcie-pci-0000-00")
 }
 
 func TestController_Reconcile_GeneratedNameCollisionUsesPublishedRails(t *testing.T) {

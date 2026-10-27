@@ -331,7 +331,10 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 				key += numaKeySuffix(partition.NUMANodes)
 			}
 			if partition.Type == PartitionPCIeRoot && len(partition.PCIeRoots) > 0 {
-				key += "-" + sanitizeForName(partition.PCIeRoots[0])
+				// Keep the raw root in the identity key. Published names are
+				// sanitized separately, so normalization collisions can be rejected
+				// instead of silently merging distinct partitions.
+				key += "-" + partition.PCIeRoots[0]
 			}
 			if coupling != CouplingNone {
 				key += "-" + string(coupling)
@@ -351,39 +354,42 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 		}
 	}
 
-	// Compute rail indices for pcieroot partitions based on sorted PCIe root
-	// address. Uses the first PCIeRoot from each partition's representative,
-	// matching the sort order used by the grouping builder for gpu-nic-pair.
-	type pcieRootEntry struct {
-		key      string
-		pcieRoot string
+	// Fixed PCIe partition classes also stopped using the reserved -railN
+	// naming. Hold the old class in place until an operator removes it, so an
+	// upgrade cannot delete a class still referenced by claims.
+	classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s/managed=true,%s/partitionType", CoordinatorDriverName, CoordinatorDriverName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to check legacy partition DeviceClasses: %w", err)
 	}
-	var pcieRootEntries []pcieRootEntry
-	for key, pp := range seen {
-		if pp.partType == PartitionPCIeRoot && len(pp.representative.PCIeRoots) > 0 {
-			pcieRootEntries = append(pcieRootEntries, pcieRootEntry{key: key, pcieRoot: pp.representative.PCIeRoots[0]})
+	for _, dc := range classes.Items {
+		if dc.Labels[CoordinatorDriverName+"/partitionType"] == string(PartitionPCIeRoot) &&
+			dc.Labels[CoordinatorDriverName+"/railIndex"] != "" {
+			return fmt.Errorf("legacy fixed-partition rail DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
 		}
 	}
-	sort.Slice(pcieRootEntries, func(i, j int) bool {
-		return pcieRootEntries[i].pcieRoot < pcieRootEntries[j].pcieRoot
-	})
-	pcieRootRailIndex := make(map[string]int)
-	for i, entry := range pcieRootEntries {
-		pcieRootRailIndex[entry.key] = i
+
+	pcieClassOwners := make(map[string]string)
+	for key, pp := range seen {
+		if pp.partType != PartitionPCIeRoot {
+			continue
+		}
+		candidate := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, pp.cachedCoupling, pp.count)
+		if owner, exists := pcieClassOwners[candidate.Name]; exists && owner != key {
+			return fmt.Errorf("PCIe-root DeviceClass name collision: %q represents distinct topology roots", candidate.Name)
+		}
+		pcieClassOwners[candidate.Name] = key
 	}
 
 	// Create/update a DeviceClass for each profile+partitionType
-	for key, pp := range seen {
+	activeNames := make(map[string]bool, len(seen))
+	for _, pp := range seen {
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, pp.cachedCoupling, pp.count)
 		if pp.partType == PartitionFull {
 			dc.Name = string(PartitionFull)
 		}
-		if pp.partType == PartitionPCIeRoot {
-			if rail, ok := pcieRootRailIndex[key]; ok {
-				dc.Labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", rail)
-				dc.Name = fmt.Sprintf("%s-rail%d", dc.Name, rail)
-			}
-		}
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish DeviceClass %s: %w", dc.Name, err))
 		}
@@ -463,6 +469,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	for _, pp := range aggregates {
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, CouplingNone, pp.count)
 		dc.Name = string(pp.partType)
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish aggregate DeviceClass %s: %w", dc.Name, err))
 		}
@@ -503,6 +510,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 		dc := m.buildDeviceClassFromCache(pp.profile, pp.partType, aggRep, pp.cachedConfig, CouplingNone, pp.count)
 		dc.Name = tierName
 		dc.Labels[CoordinatorDriverName+"/tierName"] = tierName
+		activeNames[dc.Name] = true
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish tier DeviceClass %s: %w", dc.Name, err))
 		}
@@ -510,8 +518,19 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 
 	// Clean up stale DeviceClasses no longer matching any partition
 	activeKeys := make(map[string]bool, len(seen))
-	for key := range seen {
+	for key, pp := range seen {
 		activeKeys[key] = true
+		if pp.partType == PartitionPCIeRoot && len(pp.representative.PCIeRoots) > 0 {
+			sanitizedKey := truncateLabel(pp.profile) + "-" + string(pp.partType)
+			if len(pp.representative.NUMANodes) > 0 {
+				sanitizedKey += numaKeySuffix(pp.representative.NUMANodes)
+			}
+			sanitizedKey += "-" + sanitizeForName(pp.representative.PCIeRoots[0])
+			if pp.cachedCoupling != CouplingNone {
+				sanitizedKey += "-" + string(pp.cachedCoupling)
+			}
+			activeKeys[sanitizedKey] = true
+		}
 	}
 	for ak := range aggregates {
 		aggKey := truncateLabel(ak.profile) + "-" + string(ak.partType)
@@ -520,7 +539,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	for ak, tierName := range tierNames {
 		activeKeys[truncateLabel(ak.profile)+"-"+tierName] = true
 	}
-	if err := m.cleanupStaleDeviceClasses(ctx, activeKeys); err != nil {
+	if err := m.cleanupStaleDeviceClasses(ctx, activeKeys, activeNames); err != nil {
 		klog.Errorf("Failed to cleanup stale DeviceClasses: %v", err)
 	}
 
@@ -634,7 +653,7 @@ func countPCIeRootsInNUMA(partitions []PartitionDevice, profile string, numaNode
 }
 
 // cleanupStaleDeviceClasses removes DeviceClasses that no longer match any partition.
-func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, active map[string]bool) error {
+func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, activeKeys, activeNames map[string]bool) error {
 	labelSelector := fmt.Sprintf("%s/managed=true,%s/partitionType", CoordinatorDriverName, CoordinatorDriverName)
 	classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
@@ -644,6 +663,9 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 	}
 
 	for _, dc := range classes.Items {
+		if activeNames[dc.Name] {
+			continue
+		}
 		profile := dc.Labels[CoordinatorDriverName+"/profile"]
 		partType := dc.Labels[CoordinatorDriverName+"/partitionType"]
 		tierName := dc.Labels[CoordinatorDriverName+"/tierName"]
@@ -664,7 +686,7 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 				key += "-" + coupling
 			}
 		}
-		if _, exists := active[key]; !exists {
+		if _, exists := activeKeys[key]; !exists {
 			if err := m.client.ResourceV1().DeviceClasses().Delete(ctx, dc.Name, metav1.DeleteOptions{}); err != nil {
 				if !errors.IsNotFound(err) {
 					klog.Errorf("Failed to delete stale DeviceClass %s: %v", dc.Name, err)
@@ -1170,13 +1192,41 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		}
 	}
 
-	// Emit per-instance DeviceClasses with rail index in name. Errors are
+	// Non-rail instance names changed from the historical -railN form to
+	// topology-specific names. Refuse an in-place upgrade while an old class
+	// remains, so claims keep their old target until the operator removes the
+	// legacy classes and explicitly crosses the migration boundary.
+	nonRailGroupings := make(map[string]struct{})
+	for _, entry := range seen {
+		if !entry.representative.Rail {
+			nonRailGroupings[entry.representative.GroupingName] = struct{}{}
+		}
+	}
+	if len(nonRailGroupings) > 0 {
+		classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s/managed=true,%s/grouping", CoordinatorDriverName, CoordinatorDriverName),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to check legacy grouping DeviceClasses: %w", err)
+		}
+		for _, dc := range classes.Items {
+			if _, ok := nonRailGroupings[dc.Labels[CoordinatorDriverName+"/grouping"]]; !ok {
+				continue
+			}
+			prefix := sanitizeForName(dc.Labels[CoordinatorDriverName+"/grouping"]) + "-rail"
+			if dc.Labels[CoordinatorDriverName+"/railIndex"] != "" && strings.HasPrefix(dc.Name, prefix) {
+				return fmt.Errorf("legacy non-rail grouping DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
+			}
+		}
+	}
+
+	// Emit per-instance DeviceClasses. Errors are
 	// accumulated rather than returned immediately so that one unpublishable
 	// grouping does not block every other grouping from reconciling.
 	var publishErrs []error
 	for key, entry := range seen {
 		dc := m.buildGroupingDeviceClass(key, entry.representative, entry.config, entry.count)
-		dc.Name = fmt.Sprintf("%s-rail%d", sanitizeForName(entry.representative.GroupingName), entry.representative.RailIndex)
+		dc.Name = groupingDeviceClassName(entry.representative)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish DeviceClass %s: %w", dc.Name, err))
 		}
@@ -1197,14 +1247,14 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// but only a bare GPU on rail 1); publishing one arbitrary instance's
 	// config as "the" aggregate would misrepresent rails that don't have it.
 	type groupingAggregateState struct {
-		groupingName string
-		alignment    string
-		mode         OfferingMode
-		passthrough  map[string]bool
-		intent       IntentMetadata // identical across instances, per the note above
-		acc          *deviceIntersectionState
-		minRailIndex int
-		count        int // sum of entry.count
+		groupingName     string
+		alignment        string
+		mode             OfferingMode
+		passthrough      map[string]bool
+		intent           IntentMetadata // identical across instances, per the note above
+		acc              *deviceIntersectionState
+		minInstanceIndex int
+		count            int // sum of entry.count
 	}
 	aggStates := make(map[string]*groupingAggregateState)
 	for _, entry := range seen {
@@ -1212,13 +1262,13 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		state, ok := aggStates[name]
 		if !ok {
 			state = &groupingAggregateState{
-				groupingName: name,
-				alignment:    entry.representative.Alignment,
-				mode:         entry.representative.Mode,
-				passthrough:  make(map[string]bool, len(entry.representative.PassthroughClasses)),
-				intent:       entry.representative.Intent,
-				acc:          newDeviceIntersectionState(),
-				minRailIndex: entry.representative.RailIndex,
+				groupingName:     name,
+				alignment:        entry.representative.Alignment,
+				mode:             entry.representative.Mode,
+				passthrough:      make(map[string]bool, len(entry.representative.PassthroughClasses)),
+				intent:           entry.representative.Intent,
+				acc:              newDeviceIntersectionState(),
+				minInstanceIndex: entry.representative.InstanceIndex,
 			}
 			for class, enabled := range entry.representative.PassthroughClasses {
 				state.passthrough[class] = enabled
@@ -1226,8 +1276,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			aggStates[name] = state
 		}
 		state.count += entry.count
-		if entry.representative.RailIndex < state.minRailIndex {
-			state.minRailIndex = entry.representative.RailIndex
+		if entry.representative.InstanceIndex < state.minInstanceIndex {
+			state.minInstanceIndex = entry.representative.InstanceIndex
 		}
 		state.acc.add(entry.representative.DeviceCounts, entry.representative.DeviceCapacity, entry.representative.Devices)
 	}
@@ -1243,7 +1293,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			DeviceCounts:       intersectedCounts,
 			DeviceCapacity:     intersectedCap,
 			Devices:            state.acc.devices,
-			RailIndex:          state.minRailIndex,
+			InstanceIndex:      state.minInstanceIndex,
 		}
 		aggregates[name] = &groupingEntry{
 			representative: mergedRep,
@@ -1268,7 +1318,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// DeviceClass that a prior successful reconcile already created.
 	activeNames := make(map[string]bool, len(seen)+len(aggregates))
 	for _, entry := range seen {
-		name := fmt.Sprintf("%s-rail%d", sanitizeForName(entry.representative.GroupingName), entry.representative.RailIndex)
+		name := groupingDeviceClassName(entry.representative)
 		activeNames[name] = true
 	}
 	for _, entry := range aggregates {
@@ -1288,11 +1338,49 @@ func groupingInstanceKey(inst GroupingInstance) string {
 	pk := strings.Join(inst.PCIeRoots, "-")
 	key := truncateLabel(inst.GroupingName) + "-" + sanitizeForName(inst.Alignment)
 	if pk != "" {
-		key += "-" + sanitizeForName(pk)
+		// Keep the raw topology value in the internal key. The published
+		// DeviceClass name is sanitized separately, so two distinct roots that
+		// normalize to the same DNS label remain distinguishable here.
+		key += "-" + pk
 	} else if nk != "" {
 		key += "-numa" + nk
 	}
 	return key
+}
+
+func groupingDeviceClassName(inst GroupingInstance) string {
+	base := sanitizeForName(inst.GroupingName)
+	if inst.Rail {
+		return sanitizeDNSLabel(fmt.Sprintf("%s-rail%d", base, inst.InstanceIndex))
+	}
+
+	var suffix string
+	switch inst.Alignment {
+	case "numaNode":
+		if len(inst.NUMANodes) > 0 {
+			values := make([]string, len(inst.NUMANodes))
+			for i, value := range inst.NUMANodes {
+				values[i] = fmt.Sprintf("%d", value)
+			}
+			suffix = "numa" + strings.Join(values, "-")
+		}
+	case "pcieRoot":
+		if len(inst.PCIeRoots) > 0 {
+			suffix = "pcie-" + sanitizeForName(strings.Join(inst.PCIeRoots, "-"))
+		}
+	case "socket":
+		if len(inst.Sockets) > 0 {
+			values := make([]string, len(inst.Sockets))
+			for i, value := range inst.Sockets {
+				values[i] = fmt.Sprintf("%d", value)
+			}
+			suffix = "socket" + strings.Join(values, "-")
+		}
+	}
+	if suffix == "" {
+		suffix = fmt.Sprintf("%s%d", sanitizeForName(inst.Alignment), inst.InstanceIndex)
+	}
+	return sanitizeDNSLabel(base + "-" + suffix)
 }
 
 // buildGroupingConfig builds the opaque PartitionConfig from a grouping instance.
@@ -1416,7 +1504,9 @@ func (m *DeviceClassManager) buildGroupingDeviceClass(
 		CoordinatorDriverName + "/managed":   "true",
 		CoordinatorDriverName + "/grouping":  truncateLabel(representative.GroupingName),
 		CoordinatorDriverName + "/alignment": representative.Alignment,
-		CoordinatorDriverName + "/railIndex": fmt.Sprintf("%d", representative.RailIndex),
+	}
+	if representative.Rail {
+		labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", representative.InstanceIndex)
 	}
 	if len(representative.NUMANodes) > 0 {
 		labels[CoordinatorDriverName+"/numa"] = numaKey(representative.NUMANodes)

@@ -20,6 +20,8 @@ type GroupingInstance struct {
 	GroupingName string
 	// Mode is the intended consumer mode for this offering.
 	Mode OfferingMode
+	// Rail marks an explicit GPU+NIC PCIe-root rail offering.
+	Rail bool
 	// Intent contains optional discovery metadata from the source grouping.
 	Intent IntentMetadata
 	// Alignment is the topology attribute this instance matched on
@@ -45,10 +47,8 @@ type GroupingInstance struct {
 	// ExtendedAttributes from topology rules.
 	ExtendedAttributes map[string]DeviceAttributeValue
 
-	// RailIndex is the deterministic index of this instance within its
-	// grouping on a node. Used for rail networking to map GPU-to-NIC
-	// pairings consistently across nodes.
-	RailIndex int
+	// InstanceIndex is the generic deterministic index of this instance.
+	InstanceIndex int
 }
 
 // GroupingResult holds all computed grouping instances for a single node.
@@ -242,7 +242,7 @@ func (b *GroupingBuilder) findInstances(
 				fmt.Sprintf("%s-%s-%s-%d", nodeName, grouping.Name, sanitizeForName(alignment), idx),
 				nodeName, grouping, alignment, instanceDevices,
 			)
-			inst.RailIndex = idx
+			inst.InstanceIndex = idx
 			instances = append(instances, inst)
 			idx++
 		}
@@ -287,6 +287,7 @@ func (b *GroupingBuilder) buildInstance(
 		NodeName:           nodeName,
 		GroupingName:       grouping.Name,
 		Mode:               grouping.Mode,
+		Rail:               grouping.Rail,
 		Intent:             grouping.Intent,
 		Alignment:          alignment,
 		DeviceCounts:       make(map[string]int),

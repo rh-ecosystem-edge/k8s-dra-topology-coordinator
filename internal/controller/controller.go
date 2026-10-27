@@ -701,15 +701,19 @@ func detectGroupingDeviceClassNameCollisions(results []GroupingResult) map[strin
 	ownersByName := make(map[string]map[string]struct{})
 	for _, instance := range representatives {
 		groupingName := instance.GroupingName
-		classNames := []string{
-			sanitizeForName(groupingName),
-			fmt.Sprintf("%s-rail%d", sanitizeForName(groupingName), instance.RailIndex),
+		instanceOwner := groupingName + "\x00" + groupingInstanceKey(instance)
+		classNames := []struct {
+			name  string
+			owner string
+		}{
+			{name: sanitizeForName(groupingName), owner: groupingName + "\x00aggregate"},
+			{name: groupingDeviceClassName(instance), owner: instanceOwner},
 		}
 		for _, className := range classNames {
-			if ownersByName[className] == nil {
-				ownersByName[className] = make(map[string]struct{})
+			if ownersByName[className.name] == nil {
+				ownersByName[className.name] = make(map[string]struct{})
 			}
-			ownersByName[className][groupingName] = struct{}{}
+			ownersByName[className.name][className.owner] = struct{}{}
 		}
 	}
 
@@ -718,8 +722,13 @@ func detectGroupingDeviceClassNameCollisions(results []GroupingResult) map[strin
 		if len(owners) < 2 {
 			continue
 		}
-		groupingNames := make([]string, 0, len(owners))
-		for groupingName := range owners {
+		groupingNamesSet := make(map[string]struct{}, len(owners))
+		for owner := range owners {
+			groupingName := strings.SplitN(owner, "\x00", 2)[0]
+			groupingNamesSet[groupingName] = struct{}{}
+		}
+		groupingNames := make([]string, 0, len(groupingNamesSet))
+		for groupingName := range groupingNamesSet {
 			groupingNames = append(groupingNames, groupingName)
 		}
 		sort.Strings(groupingNames)

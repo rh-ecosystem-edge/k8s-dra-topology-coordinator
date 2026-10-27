@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -61,6 +62,8 @@ type DeviceGrouping struct {
 	Fallback string
 	// Mode is the intended consumer mode for this offering.
 	Mode OfferingMode
+	// Rail marks an explicit GPU+NIC PCIe-root rail offering.
+	Rail bool
 	// Devices lists the device classes and counts required in this grouping.
 	Devices []GroupingDevice
 	// Intent contains optional offering metadata from the source ConfigMap.
@@ -143,6 +146,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 			Alignment:       g.Alignment,
 			Fallback:        g.Fallback,
 			Mode:            g.Mode,
+			Rail:            g.Rail,
 			Devices:         devicesCopy,
 			Intent:          intentCopy,
 			sourceConfigMap: g.sourceConfigMap,
@@ -159,6 +163,13 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 	if g.Mode != OfferingModeContainer && g.Mode != OfferingModePassthrough {
 		return g, fmt.Errorf("invalid mode %q: must be container or passthrough", g.Mode)
+	}
+	if rail := cm.Data["rail"]; rail != "" {
+		parsed, err := strconv.ParseBool(rail)
+		if err != nil {
+			return g, fmt.Errorf("invalid rail %q: must be true or false", rail)
+		}
+		g.Rail = parsed
 	}
 
 	name := cm.Data["name"]
@@ -252,6 +263,22 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
+		}
+	}
+	if g.Rail {
+		if g.Alignment != "pcieRoot" {
+			return g, fmt.Errorf("rail offerings require alignment pcieRoot")
+		}
+		if g.Fallback != "" {
+			return g, fmt.Errorf("rail offerings cannot use fallback; GPU and NIC devices must share a PCIe root")
+		}
+		if len(devices) != 2 {
+			return g, fmt.Errorf("rail offerings require exactly two devices")
+		}
+		for i, d := range devices {
+			if d.Count != 1 {
+				return g, fmt.Errorf("rail device[%d] requires count 1, got %d", i, d.Count)
+			}
 		}
 	}
 

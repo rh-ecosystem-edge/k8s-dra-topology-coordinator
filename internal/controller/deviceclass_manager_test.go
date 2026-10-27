@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -25,6 +27,57 @@ func findSpecificDC(items []resourcev1.DeviceClass) *resourcev1.DeviceClass {
 		return &items[0]
 	}
 	return nil
+}
+
+func TestGroupingDeviceClassName_UsesRailOnlyWhenExplicit(t *testing.T) {
+	rail := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "pcieRoot",
+		Rail:          true,
+		InstanceIndex: 1,
+	}
+	assert.Equal(t, "gpu-nic-pair-rail1", groupingDeviceClassName(rail))
+
+	numa := GroupingInstance{
+		GroupingName:  "inference-cpu-memory",
+		Alignment:     "numaNode",
+		NUMANodes:     []int64{1},
+		InstanceIndex: 1,
+	}
+	assert.Equal(t, "inference-cpu-memory-numa1", groupingDeviceClassName(numa))
+}
+
+func TestGroupingDeviceClassName_UsesTopologySpecificSuffixes(t *testing.T) {
+	pcie := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "pcieRoot",
+		PCIeRoots:     []string{"pci0000:00"},
+		InstanceIndex: 0,
+	}
+	socket := GroupingInstance{
+		GroupingName:  "cpu-memory",
+		Alignment:     "socket",
+		Sockets:       []int64{2},
+		InstanceIndex: 0,
+	}
+	assert.Equal(t, "gpu-nic-pair-pcie-pci0000-00", groupingDeviceClassName(pcie))
+	assert.Equal(t, "cpu-memory-socket2", groupingDeviceClassName(socket))
+}
+
+func TestGroupingDeviceClassName_IsDeterministicAndDNSBounded(t *testing.T) {
+	instance := GroupingInstance{
+		GroupingName:  strings.Repeat("long-grouping-", 5),
+		Alignment:     "pcieRoot",
+		PCIeRoots:     []string{strings.Repeat("pci-root-", 10)},
+		InstanceIndex: 7,
+	}
+	first := groupingDeviceClassName(instance)
+	second := groupingDeviceClassName(instance)
+
+	assert.Equal(t, first, second)
+	assert.LessOrEqual(t, len(first), 63)
+	assert.NotEmpty(t, first)
+	assert.Empty(t, validation.IsDNS1123Label(first))
 }
 
 func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
@@ -74,6 +127,148 @@ func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
 		assert.Equal(t, "true", dc.Labels[CoordinatorDriverName+"/managed"])
 		assert.NotEmpty(t, dc.Labels[CoordinatorDriverName+"/partitionType"])
 	}
+}
+
+func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{{
+			Name:         "node-1-pcie-0",
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			NUMANodes:    []int64{0},
+			PCIeRoots:    []string{"pci0000:00"},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}},
+	}}
+
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	for _, dc := range classes.Items {
+		if dc.Labels[CoordinatorDriverName+"/partitionType"] != string(PartitionPCIeRoot) {
+			continue
+		}
+		assert.NotContains(t, dc.Name, "-rail")
+		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/railIndex")
+	}
+}
+
+func TestDeviceClassManager_SyncDeviceClasses_RequiresLegacyPartitionRailMigration(t *testing.T) {
+	legacy := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-example-com-pcieroot-numa0-pci0000-00-loose-rail0",
+			Labels: map[string]string{
+				CoordinatorDriverName + "/managed":       "true",
+				CoordinatorDriverName + "/profile":       "gpu.example.com",
+				CoordinatorDriverName + "/partitionType": string(PartitionPCIeRoot),
+				CoordinatorDriverName + "/numa":          "numa0-pci0000-00",
+				CoordinatorDriverName + "/coupling":      string(CouplingLoose),
+				CoordinatorDriverName + "/railIndex":     "0",
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(legacy)
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{{
+			Name:         "node-1-pcie-0",
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			NUMANodes:    []int64{0},
+			PCIeRoots:    []string{"pci0000:00"},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}},
+	}}
+
+	err := manager.SyncDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy fixed-partition rail DeviceClass")
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	require.NoError(t, client.ResourceV1().DeviceClasses().Delete(context.Background(), legacy.Name, metav1.DeleteOptions{}))
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
+}
+
+func TestDeviceClassManager_SyncDeviceClasses_RejectsSanitizedPCIeRootCollision(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{
+			{
+				Name:         "node-1-pcie-colon",
+				Type:         PartitionPCIeRoot,
+				Profile:      "gpu.example.com",
+				PCIeRoots:    []string{"pci:0000:00"},
+				DeviceCounts: map[string]int{"gpu.example.com": 1},
+			},
+			{
+				Name:         "node-1-pcie-dash",
+				Type:         PartitionPCIeRoot,
+				Profile:      "gpu.example.com",
+				PCIeRoots:    []string{"pci-0000:00"},
+				DeviceCounts: map[string]int{"gpu.example.com": 1},
+			},
+		},
+	}}
+
+	err := manager.SyncDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PCIe-root DeviceClass name collision")
+	classes, listErr := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, classes.Items)
+}
+
+func TestDeviceClassManager_SyncDeviceClasses_RemovesStalePCIeRootByName(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	partition := func(root string) PartitionDevice {
+		return PartitionDevice{
+			Name:         "node-1-" + root,
+			Type:         PartitionPCIeRoot,
+			Profile:      "gpu.example.com",
+			PCIeRoots:    []string{root},
+			DeviceCounts: map[string]int{"gpu.example.com": 1},
+		}
+	}
+	first := []PartitionResult{{
+		NodeName:   "node-1",
+		Profile:    "gpu.example.com",
+		Partitions: []PartitionDevice{partition("pci0000:00"), partition("pci0000:01")},
+	}}
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), first))
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	var staleName, activeName string
+	for _, dc := range classes.Items {
+		if strings.Contains(dc.Name, "pci0000-01") {
+			staleName = dc.Name
+		}
+		if strings.Contains(dc.Name, "pci0000-00") {
+			activeName = dc.Name
+		}
+	}
+	require.NotEmpty(t, staleName)
+	require.NotEmpty(t, activeName)
+
+	second := []PartitionResult{{
+		NodeName:   "node-1",
+		Profile:    "gpu.example.com",
+		Partitions: []PartitionDevice{partition("pci0000:00")},
+	}}
+	require.NoError(t, manager.SyncDeviceClasses(context.Background(), second))
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), staleName, metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), activeName, metav1.GetOptions{})
+	assert.NoError(t, err)
 }
 
 func TestDeviceClassManager_DeviceClassContents(t *testing.T) {
@@ -1073,6 +1268,7 @@ func multiDeviceGroupingInstance(railIndex int) GroupingInstance {
 		Name:         fmt.Sprintf("node-1-gpu-nic-pair-pcieroot-%d", railIndex),
 		NodeName:     "node-1",
 		GroupingName: "gpu-nic-pair",
+		Rail:         true,
 		Alignment:    "pcieRoot",
 		PCIeRoots:    []string{fmt.Sprintf("pci0000:%02d", railIndex)},
 		DeviceCounts: map[string]int{
@@ -1080,7 +1276,7 @@ func multiDeviceGroupingInstance(railIndex int) GroupingInstance {
 			"rdma.mellanox.com": 1,
 			"nvme.example.com":  1,
 		},
-		RailIndex: railIndex,
+		InstanceIndex: railIndex,
 	}
 }
 
@@ -1242,6 +1438,44 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_NoIntentMetadata(t *testin
 	}
 }
 
+func TestDeviceClassManager_SyncGroupingDeviceClasses_RemovesLegacyRailNameForNonRail(t *testing.T) {
+	legacy := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gpu-nic-pair-rail0",
+			Labels: map[string]string{
+				CoordinatorDriverName + "/managed":   "true",
+				CoordinatorDriverName + "/grouping":  "gpu-nic-pair",
+				CoordinatorDriverName + "/railIndex": "0",
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(legacy)
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	nonRail := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "numaNode",
+		NUMANodes:     []int64{0},
+		InstanceIndex: 0,
+		DeviceCounts:  map[string]int{"gpu.example.com": 1},
+	}
+
+	results := []GroupingResult{{
+		NodeName:  "node-1",
+		Instances: []GroupingInstance{nonRail},
+	}}
+
+	err := manager.SyncGroupingDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy non-rail grouping DeviceClass")
+
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), legacy.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	require.NoError(t, client.ResourceV1().DeviceClasses().Delete(context.Background(), legacy.Name, metav1.DeleteOptions{}))
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), results))
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair-numa0", metav1.GetOptions{})
+	assert.NoError(t, err)
+}
+
 func TestDeviceClassManager_SyncGroupingDeviceClasses_AutoDetectedHasNoIntentMetadata(t *testing.T) {
 	model := NewTopologyModel()
 	nodeTopo := &NodeTopology{
@@ -1266,6 +1500,8 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AutoDetectedHasNoIntentMet
 	require.NoError(t, err)
 	require.NotEmpty(t, classes.Items)
 	for _, dc := range classes.Items {
+		assert.NotContains(t, dc.Name, "-rail")
+		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/railIndex")
 		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/intent-level")
 		assert.NotContains(t, dc.Labels, CoordinatorDriverName+"/visibility")
 		assert.NotContains(t, dc.Annotations, CoordinatorDriverName+"/display-name")
@@ -1467,7 +1703,7 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIntersectsAsymmet
 	// at the minimum count (1), and nic/nvme excluded entirely since they're
 	// not present on rail 1. Without intersection, the aggregate would
 	// arbitrarily publish whichever rail's full config happened to "win" by
-	// lowest RailIndex, misrepresenting rail 1's actual (lesser) capability.
+	// lowest InstanceIndex, misrepresenting rail 1's actual (lesser) capability.
 	rail0 := multiDeviceGroupingInstance(0)
 	rail1 := GroupingInstance{
 		Name:         "node-1-gpu-nic-pair-pcieroot-1",
@@ -1478,7 +1714,8 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIntersectsAsymmet
 		DeviceCounts: map[string]int{
 			"gpu.nvidia.com": 2, // higher count than rail0's 1 -> min must win
 		},
-		RailIndex: 1,
+		Rail:          true,
+		InstanceIndex: 1,
 	}
 
 	results := []GroupingResult{
