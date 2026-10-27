@@ -48,6 +48,15 @@ func TestRemoveStaleWebhookConfigurations(t *testing.T) {
 			Labels: map[string]string{
 				"app.kubernetes.io/name":      "nodepartition",
 				"app.kubernetes.io/component": "controller",
+				"app.kubernetes.io/instance":  "old-release",
+			},
+		}},
+		&admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{
+			Name: "current-release-nodepartition",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "nodepartition",
+				"app.kubernetes.io/component": "controller",
+				"app.kubernetes.io/instance":  "current-release",
 			},
 		}},
 		&admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{
@@ -60,6 +69,36 @@ func TestRemoveStaleWebhookConfigurations(t *testing.T) {
 	assert.NoError(t, h.removeStaleWebhookConfigurations(context.Background()))
 	_, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "old-release", metav1.GetOptions{})
 	assert.Error(t, err)
+	_, err = client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "current-release-nodepartition", metav1.GetOptions{})
+	assert.NoError(t, err)
 	_, err = client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "unrelated", metav1.GetOptions{})
+	assert.NoError(t, err)
+}
+
+func TestDeleteReleaseWebhookConfigurations(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{
+			Name: "current-release-nodepartition",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "nodepartition",
+				"app.kubernetes.io/component": "controller",
+				"app.kubernetes.io/instance":  "current-release",
+			},
+		}},
+		&admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{
+			Name: "other-release-nodepartition",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "nodepartition",
+				"app.kubernetes.io/component": "controller",
+				"app.kubernetes.io/instance":  "other-release",
+			},
+		}},
+	)
+	h := &harness{client: client, cfg: Config{Release: "current-release"}}
+
+	assert.NoError(t, h.deleteReleaseWebhookConfigurations(context.Background()))
+	_, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "current-release-nodepartition", metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), "other-release-nodepartition", metav1.GetOptions{})
 	assert.NoError(t, err)
 }

@@ -109,21 +109,7 @@ func (h *harness) prepare(ctx context.Context) error {
 }
 
 func (h *harness) removeStaleWebhookConfigurations(ctx context.Context) error {
-	configs, err := h.client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=nodepartition,app.kubernetes.io/component=controller",
-	})
-	if err != nil {
-		return fmt.Errorf("list stale webhook configurations: %w", err)
-	}
-	for _, config := range configs.Items {
-		if config.Name == h.cfg.Release {
-			continue
-		}
-		if err := h.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(ctx, config.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete stale webhook configuration %q: %w", config.Name, err)
-		}
-	}
-	return nil
+	return h.deleteWebhookConfigurations(ctx, "app.kubernetes.io/name=nodepartition,app.kubernetes.io/component=controller,app.kubernetes.io/instance!="+h.cfg.Release)
 }
 
 func (h *harness) newManagedDeviceClassNames(classes *resourcev1.DeviceClassList) []string {
@@ -155,6 +141,9 @@ func (h *harness) trackManagedDeviceClasses(ctx context.Context) error {
 }
 
 func (h *harness) cleanup(ctx context.Context) {
+	if err := h.deleteReleaseWebhookConfigurations(ctx); err != nil {
+		h.t.Logf("cleanup: delete webhook configurations: %v", err)
+	}
 	if err := h.trackManagedDeviceClasses(ctx); err != nil {
 		h.t.Logf("cleanup: list managed DeviceClasses: %v", err)
 	}
@@ -181,6 +170,25 @@ func (h *harness) cleanup(ctx context.Context) {
 		}
 		h.t.Logf("cleanup: namespace %s still exists after deletion timeout", h.cfg.Namespace)
 	}
+}
+
+func (h *harness) deleteReleaseWebhookConfigurations(ctx context.Context) error {
+	return h.deleteWebhookConfigurations(ctx, "app.kubernetes.io/name=nodepartition,app.kubernetes.io/component=controller,app.kubernetes.io/instance="+h.cfg.Release)
+}
+
+func (h *harness) deleteWebhookConfigurations(ctx context.Context, selector string) error {
+	configs, err := h.client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return fmt.Errorf("list webhook configurations: %w", err)
+	}
+	for _, config := range configs.Items {
+		if err := h.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Delete(ctx, config.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete webhook configuration %q: %w", config.Name, err)
+		}
+	}
+	return nil
 }
 
 func (h *harness) helm(ctx context.Context, args ...string) error {
