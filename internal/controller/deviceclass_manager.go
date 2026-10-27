@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	// CoordinatorDriverName is the identifier used in DeviceClass labels
-	// and opaque configuration for the topology coordinator.
+	// CoordinatorDriverName is the fixed identifier used in topology coordinator
+	// DeviceClass labels and annotations. The DRA driver name in opaque config
+	// is configurable through --driver-name.
 	CoordinatorDriverName = "nodepartition.dra.k8s.io"
 )
 

@@ -71,7 +71,7 @@ func init() {
 	rootCmd.Flags().StringVar(&kubecfg, "kubeconfig", "",
 		"Path to kubeconfig file (optional, uses in-cluster config if not specified)")
 	rootCmd.Flags().StringVar(&driverName, "driver-name", "nodepartition.dra.k8s.io",
-		"Coordinator identifier for DeviceClass labels and opaque config")
+		"DRA driver name used in generated DeviceClass selectors and opaque config")
 	rootCmd.Flags().StringVar(&partitionMode, "partition-mode", "auto",
 		`Partition strategy: "auto" (groupings if ConfigMaps exist, else fixed partitions), `+
 			`"partitions" (always fixed hierarchy), or "groupings" (always admin-defined groupings)`)
