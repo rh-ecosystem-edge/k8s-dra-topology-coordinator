@@ -195,6 +195,38 @@ func TestDeviceClassManager_SyncDeviceClasses_RequiresLegacyPartitionRailMigrati
 	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
 }
 
+func TestDeviceClassManager_SyncDeviceClasses_RejectsSanitizedPCIeRootCollision(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []PartitionResult{{
+		NodeName: "node-1",
+		Profile:  "gpu.example.com",
+		Partitions: []PartitionDevice{
+			{
+				Name:         "node-1-pcie-colon",
+				Type:         PartitionPCIeRoot,
+				Profile:      "gpu.example.com",
+				PCIeRoots:    []string{"pci:0000:00"},
+				DeviceCounts: map[string]int{"gpu.example.com": 1},
+			},
+			{
+				Name:         "node-1-pcie-dash",
+				Type:         PartitionPCIeRoot,
+				Profile:      "gpu.example.com",
+				PCIeRoots:    []string{"pci-0000:00"},
+				DeviceCounts: map[string]int{"gpu.example.com": 1},
+			},
+		},
+	}}
+
+	err := manager.SyncDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PCIe-root DeviceClass name collision")
+	classes, listErr := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, classes.Items)
+}
+
 func TestDeviceClassManager_DeviceClassContents(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	rules := NewTopologyRuleStore()

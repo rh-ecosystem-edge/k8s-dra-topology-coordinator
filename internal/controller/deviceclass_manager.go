@@ -331,7 +331,10 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 				key += numaKeySuffix(partition.NUMANodes)
 			}
 			if partition.Type == PartitionPCIeRoot && len(partition.PCIeRoots) > 0 {
-				key += "-" + sanitizeForName(partition.PCIeRoots[0])
+				// Keep the raw root in the identity key. Published names are
+				// sanitized separately, so normalization collisions can be rejected
+				// instead of silently merging distinct partitions.
+				key += "-" + partition.PCIeRoots[0]
 			}
 			if coupling != CouplingNone {
 				key += "-" + string(coupling)
@@ -365,6 +368,18 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 			dc.Labels[CoordinatorDriverName+"/railIndex"] != "" {
 			return fmt.Errorf("legacy fixed-partition rail DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
 		}
+	}
+
+	pcieClassOwners := make(map[string]string)
+	for key, pp := range seen {
+		if pp.partType != PartitionPCIeRoot {
+			continue
+		}
+		candidate := m.buildDeviceClassFromCache(pp.profile, pp.partType, pp.representative, pp.cachedConfig, pp.cachedCoupling, pp.count)
+		if owner, exists := pcieClassOwners[candidate.Name]; exists && owner != key {
+			return fmt.Errorf("PCIe-root DeviceClass name collision: %q represents distinct topology roots", candidate.Name)
+		}
+		pcieClassOwners[candidate.Name] = key
 	}
 
 	// Create/update a DeviceClass for each profile+partitionType
@@ -499,8 +514,19 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 
 	// Clean up stale DeviceClasses no longer matching any partition
 	activeKeys := make(map[string]bool, len(seen))
-	for key := range seen {
+	for key, pp := range seen {
 		activeKeys[key] = true
+		if pp.partType == PartitionPCIeRoot && len(pp.representative.PCIeRoots) > 0 {
+			sanitizedKey := truncateLabel(pp.profile) + "-" + string(pp.partType)
+			if len(pp.representative.NUMANodes) > 0 {
+				sanitizedKey += numaKeySuffix(pp.representative.NUMANodes)
+			}
+			sanitizedKey += "-" + sanitizeForName(pp.representative.PCIeRoots[0])
+			if pp.cachedCoupling != CouplingNone {
+				sanitizedKey += "-" + string(pp.cachedCoupling)
+			}
+			activeKeys[sanitizedKey] = true
+		}
 	}
 	for ak := range aggregates {
 		aggKey := truncateLabel(ak.profile) + "-" + string(ak.partType)
