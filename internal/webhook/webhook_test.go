@@ -22,7 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/controller"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
 
 // makePartitionDeviceClass creates a DeviceClass with a PartitionConfig opaque config.

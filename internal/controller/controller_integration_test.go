@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/controller"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
 
 func intPtr(v int64) *int64   { return &v }

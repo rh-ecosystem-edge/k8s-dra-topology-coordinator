@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,7 +17,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	klog "k8s.io/klog/v2"
 
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/metrics"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/metrics"
 )
 
 const (
@@ -57,12 +58,14 @@ type Controller struct {
 	groupingBuilder  *GroupingBuilder
 	classManager     *DeviceClassManager
 
-	// synced is set after informer caches are synced and initial reconcile completes.
+	// synced is set after informer caches are synchronized. It is atomic because
+	// informer callbacks can run while StartCache is finishing.
 	// Event handlers skip enqueueing reconciles until this is true.
-	synced bool
+	synced atomic.Bool
 
 	// workqueue triggers a full reconciliation when topology changes
-	workqueue workqueue.TypedRateLimitingInterface[string]
+	workqueue  workqueue.TypedRateLimitingInterface[string]
+	publishing atomic.Bool
 }
 
 // NewController creates a new topology coordinator controller.
@@ -99,10 +102,12 @@ func (c *Controller) Model() *TopologyModel {
 	return c.model
 }
 
-// Run starts the controller. It blocks until the context is cancelled.
-func (c *Controller) Run(ctx context.Context) error {
-	klog.Info("Starting topology coordinator controller")
-
+// StartCache starts the informer caches and populates the topology model. It
+// returns after the local cache is synchronized; callers may then serve
+// admission while a leader independently controls publication.
+func (c *Controller) StartCache(ctx context.Context) error {
+	klog.Info("Starting topology coordinator cache")
+	c.workqueue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
 	// Set up informers
 	factory := informers.NewSharedInformerFactory(c.client, defaultResyncPeriod)
 
@@ -186,17 +191,45 @@ func (c *Controller) Run(ctx context.Context) error {
 		}
 	}
 
-	// Run reconciliation loop
+	c.synced.Store(true)
+	return nil
+}
+
+// RunWorker processes reconciliation events. Non-leaders keep their caches
+// current but skip publication until SetPublishing(true) is called.
+func (c *Controller) RunWorker(ctx context.Context) error {
+	klog.Info("Starting topology coordinator worker")
 	go c.runWorker(ctx)
-
-	// Trigger initial reconciliation
-	c.workqueue.Add("reconcile")
-	c.synced = true
-
 	<-ctx.Done()
 	c.workqueue.ShutDown()
-	klog.Info("Topology coordinator controller stopped")
+	klog.Info("Topology coordinator worker stopped")
 	return nil
+}
+
+// SetPublishing enables or disables DeviceClass publication for this replica.
+func (c *Controller) SetPublishing(enabled bool) {
+	c.publishing.Store(enabled)
+	if enabled {
+		c.EnqueueReconcile()
+	}
+}
+
+// EnqueueReconcile requests a full reconciliation.
+func (c *Controller) EnqueueReconcile() {
+	if c.synced.Load() {
+		c.workqueue.Add("reconcile")
+	}
+}
+
+// Run starts the controller as a publishing leader. It is retained for tests
+// and single-replica callers; multi-replica deployments should start caches on
+// every replica and toggle publication from leader-election callbacks.
+func (c *Controller) Run(ctx context.Context) error {
+	if err := c.StartCache(ctx); err != nil {
+		return err
+	}
+	c.SetPublishing(true)
+	return c.RunWorker(ctx)
 }
 
 // runWorker processes items from the workqueue.
@@ -205,6 +238,11 @@ func (c *Controller) runWorker(ctx context.Context) {
 		key, shutdown := c.workqueue.Get()
 		if shutdown {
 			return
+		}
+		if !c.publishing.Load() {
+			c.workqueue.Forget(key)
+			c.workqueue.Done(key)
+			continue
 		}
 
 		if err := c.reconcile(ctx); err != nil {
@@ -366,7 +404,7 @@ func (c *Controller) onSliceAdd(obj interface{}) {
 		return
 	}
 	c.model.UpdateFromResourceSlice(slice)
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -378,7 +416,7 @@ func (c *Controller) onSliceUpdate(_, newObj interface{}) {
 		return
 	}
 	c.model.UpdateFromResourceSlice(slice)
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -465,7 +503,7 @@ func (c *Controller) onGroupingConfigMapAdd(obj interface{}) {
 		klog.Errorf("Failed to load device grouping from %s/%s: %v", cm.Namespace, cm.Name, err)
 		return
 	}
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }
@@ -484,7 +522,7 @@ func (c *Controller) onGroupingConfigMapUpdate(_, newObj interface{}) {
 			cm.Namespace, cm.Name, err)
 		return
 	}
-	if c.synced {
+	if c.synced.Load() {
 		c.workqueue.AddAfter("reconcile", reconcileDebounceDelay)
 	}
 }

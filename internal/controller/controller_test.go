@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,6 +55,28 @@ func TestController_Reconcile_DuplicateUserNamesLogsActionableError(t *testing.T
 	assert.Contains(t, logs, "shared-offering")
 	assert.Contains(t, logs, "default/first")
 	assert.Contains(t, logs, "default/second")
+}
+
+func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	ctrl := NewController(client, CoordinatorDriverName, PartitionModePartitions)
+	addGPUAndNICTopology(ctrl)
+	ctrl.synced.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ctrl.RunWorker(ctx) }()
+
+	classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, classes.Items)
+
+	ctrl.SetPublishing(true)
+	ctrl.EnqueueReconcile()
+	require.Eventually(t, func() bool {
+		classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{})
+		return err == nil && len(classes.Items) > 0
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 func TestController_Reconcile_AutoGroupingOverrideIsNotDiagnosedAsDuplicate(t *testing.T) {

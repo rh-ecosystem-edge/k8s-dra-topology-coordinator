@@ -1,4 +1,4 @@
-module github.com/fabiendupont/k8s-dra-driver-nodepartition
+module github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator
 
 go 1.25.0
 

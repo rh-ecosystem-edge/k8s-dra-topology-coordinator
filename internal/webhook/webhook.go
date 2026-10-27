@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	klog "k8s.io/klog/v2"
 
-	"github.com/fabiendupont/k8s-dra-driver-nodepartition/internal/controller"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
 
 const (
