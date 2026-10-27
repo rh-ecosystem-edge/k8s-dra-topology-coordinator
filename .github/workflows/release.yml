@@ -27,7 +27,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/fabiendupont/nodepartition-controller
+          images: ghcr.io/rh-ecosystem-edge/nodepartition-controller
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -61,4 +61,4 @@ jobs:
       - name: Package and push chart
         run: |
           helm package deploy/helm/nodepartition
-          helm push nodepartition-*.tgz oci://ghcr.io/fabiendupont/charts
+          helm push nodepartition-*.tgz oci://ghcr.io/rh-ecosystem-edge/charts

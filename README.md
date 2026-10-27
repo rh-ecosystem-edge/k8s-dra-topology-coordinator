@@ -281,12 +281,21 @@ Build the container image with:
 docker build -t nodepartition-controller:dev .
 ```
 
-The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`.
+The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`. A source checkout does not publish an image automatically, so use the local-image override below when installing from source.
 
 ## Helm installation
 
 ```sh
 helm install nodepartition deploy/helm/nodepartition \
+  --namespace nodepartition \
+  --create-namespace
+```
+
+For a tagged release, install the chart from GHCR instead:
+
+```sh
+helm install nodepartition oci://ghcr.io/rh-ecosystem-edge/charts/nodepartition \
+  --version <release-version> \
   --namespace nodepartition \
   --create-namespace
 ```

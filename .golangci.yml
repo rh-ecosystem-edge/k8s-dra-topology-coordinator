@@ -20,4 +20,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/fabiendupont/k8s-dra-driver-nodepartition
+        - github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator
