@@ -166,11 +166,11 @@ func runController(_ *cobra.Command, _ []string) error {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				klog.Info("Acquired leader election, enabling DeviceClass publication")
-				ctrl.SetPublishing(true)
+				ctrl.SetPublishingContext(ctx)
 			},
 			OnStoppedLeading: func() {
 				klog.Info("Lost leader election")
-				ctrl.SetPublishing(false)
+				ctrl.StopPublishing()
 			},
 			OnNewLeader: func(newLeader string) {
 				if newLeader != identity {
