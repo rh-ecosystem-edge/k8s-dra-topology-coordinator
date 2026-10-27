@@ -703,7 +703,7 @@ func detectGroupingDeviceClassNameCollisions(results []GroupingResult) map[strin
 		groupingName := instance.GroupingName
 		classNames := []string{
 			sanitizeForName(groupingName),
-			fmt.Sprintf("%s-rail%d", sanitizeForName(groupingName), instance.RailIndex),
+			groupingDeviceClassName(instance),
 		}
 		for _, className := range classNames {
 			if ownersByName[className] == nil {

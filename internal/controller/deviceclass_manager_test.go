@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -25,6 +27,57 @@ func findSpecificDC(items []resourcev1.DeviceClass) *resourcev1.DeviceClass {
 		return &items[0]
 	}
 	return nil
+}
+
+func TestGroupingDeviceClassName_UsesRailOnlyWhenExplicit(t *testing.T) {
+	rail := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "pcieRoot",
+		Rail:          true,
+		InstanceIndex: 1,
+	}
+	assert.Equal(t, "gpu-nic-pair-rail1", groupingDeviceClassName(rail))
+
+	numa := GroupingInstance{
+		GroupingName:  "inference-cpu-memory",
+		Alignment:     "numaNode",
+		NUMANodes:     []int64{1},
+		InstanceIndex: 1,
+	}
+	assert.Equal(t, "inference-cpu-memory-numa1", groupingDeviceClassName(numa))
+}
+
+func TestGroupingDeviceClassName_UsesTopologySpecificSuffixes(t *testing.T) {
+	pcie := GroupingInstance{
+		GroupingName:  "gpu-nic-pair",
+		Alignment:     "pcieRoot",
+		PCIeRoots:     []string{"pci0000:00"},
+		InstanceIndex: 0,
+	}
+	socket := GroupingInstance{
+		GroupingName:  "cpu-memory",
+		Alignment:     "socket",
+		Sockets:       []int64{2},
+		InstanceIndex: 0,
+	}
+	assert.Equal(t, "gpu-nic-pair-pcie-pci0000-00", groupingDeviceClassName(pcie))
+	assert.Equal(t, "cpu-memory-socket2", groupingDeviceClassName(socket))
+}
+
+func TestGroupingDeviceClassName_IsDeterministicAndDNSBounded(t *testing.T) {
+	instance := GroupingInstance{
+		GroupingName:  strings.Repeat("long-grouping-", 5),
+		Alignment:     "pcieRoot",
+		PCIeRoots:     []string{strings.Repeat("pci-root-", 10)},
+		InstanceIndex: 7,
+	}
+	first := groupingDeviceClassName(instance)
+	second := groupingDeviceClassName(instance)
+
+	assert.Equal(t, first, second)
+	assert.LessOrEqual(t, len(first), 63)
+	assert.NotEmpty(t, first)
+	assert.Empty(t, validation.IsDNS1123Label(first))
 }
 
 func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
@@ -1073,6 +1126,7 @@ func multiDeviceGroupingInstance(railIndex int) GroupingInstance {
 		Name:         fmt.Sprintf("node-1-gpu-nic-pair-pcieroot-%d", railIndex),
 		NodeName:     "node-1",
 		GroupingName: "gpu-nic-pair",
+		Rail:         true,
 		Alignment:    "pcieRoot",
 		PCIeRoots:    []string{fmt.Sprintf("pci0000:%02d", railIndex)},
 		DeviceCounts: map[string]int{
@@ -1080,7 +1134,7 @@ func multiDeviceGroupingInstance(railIndex int) GroupingInstance {
 			"rdma.mellanox.com": 1,
 			"nvme.example.com":  1,
 		},
-		RailIndex: railIndex,
+		InstanceIndex: railIndex,
 	}
 }
 
@@ -1467,7 +1521,7 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIntersectsAsymmet
 	// at the minimum count (1), and nic/nvme excluded entirely since they're
 	// not present on rail 1. Without intersection, the aggregate would
 	// arbitrarily publish whichever rail's full config happened to "win" by
-	// lowest RailIndex, misrepresenting rail 1's actual (lesser) capability.
+	// lowest InstanceIndex, misrepresenting rail 1's actual (lesser) capability.
 	rail0 := multiDeviceGroupingInstance(0)
 	rail1 := GroupingInstance{
 		Name:         "node-1-gpu-nic-pair-pcieroot-1",
@@ -1478,7 +1532,8 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIntersectsAsymmet
 		DeviceCounts: map[string]int{
 			"gpu.nvidia.com": 2, // higher count than rail0's 1 -> min must win
 		},
-		RailIndex: 1,
+		Rail:          true,
+		InstanceIndex: 1,
 	}
 
 	results := []GroupingResult{

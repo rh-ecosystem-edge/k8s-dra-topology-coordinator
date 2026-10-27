@@ -1170,13 +1170,13 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		}
 	}
 
-	// Emit per-instance DeviceClasses with rail index in name. Errors are
+	// Emit per-instance DeviceClasses. Errors are
 	// accumulated rather than returned immediately so that one unpublishable
 	// grouping does not block every other grouping from reconciling.
 	var publishErrs []error
 	for key, entry := range seen {
 		dc := m.buildGroupingDeviceClass(key, entry.representative, entry.config, entry.count)
-		dc.Name = fmt.Sprintf("%s-rail%d", sanitizeForName(entry.representative.GroupingName), entry.representative.RailIndex)
+		dc.Name = groupingDeviceClassName(entry.representative)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish DeviceClass %s: %w", dc.Name, err))
 		}
@@ -1197,14 +1197,14 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// but only a bare GPU on rail 1); publishing one arbitrary instance's
 	// config as "the" aggregate would misrepresent rails that don't have it.
 	type groupingAggregateState struct {
-		groupingName string
-		alignment    string
-		mode         OfferingMode
-		passthrough  map[string]bool
-		intent       IntentMetadata // identical across instances, per the note above
-		acc          *deviceIntersectionState
-		minRailIndex int
-		count        int // sum of entry.count
+		groupingName     string
+		alignment        string
+		mode             OfferingMode
+		passthrough      map[string]bool
+		intent           IntentMetadata // identical across instances, per the note above
+		acc              *deviceIntersectionState
+		minInstanceIndex int
+		count            int // sum of entry.count
 	}
 	aggStates := make(map[string]*groupingAggregateState)
 	for _, entry := range seen {
@@ -1212,13 +1212,13 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		state, ok := aggStates[name]
 		if !ok {
 			state = &groupingAggregateState{
-				groupingName: name,
-				alignment:    entry.representative.Alignment,
-				mode:         entry.representative.Mode,
-				passthrough:  make(map[string]bool, len(entry.representative.PassthroughClasses)),
-				intent:       entry.representative.Intent,
-				acc:          newDeviceIntersectionState(),
-				minRailIndex: entry.representative.RailIndex,
+				groupingName:     name,
+				alignment:        entry.representative.Alignment,
+				mode:             entry.representative.Mode,
+				passthrough:      make(map[string]bool, len(entry.representative.PassthroughClasses)),
+				intent:           entry.representative.Intent,
+				acc:              newDeviceIntersectionState(),
+				minInstanceIndex: entry.representative.InstanceIndex,
 			}
 			for class, enabled := range entry.representative.PassthroughClasses {
 				state.passthrough[class] = enabled
@@ -1226,8 +1226,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			aggStates[name] = state
 		}
 		state.count += entry.count
-		if entry.representative.RailIndex < state.minRailIndex {
-			state.minRailIndex = entry.representative.RailIndex
+		if entry.representative.InstanceIndex < state.minInstanceIndex {
+			state.minInstanceIndex = entry.representative.InstanceIndex
 		}
 		state.acc.add(entry.representative.DeviceCounts, entry.representative.DeviceCapacity, entry.representative.Devices)
 	}
@@ -1243,7 +1243,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			DeviceCounts:       intersectedCounts,
 			DeviceCapacity:     intersectedCap,
 			Devices:            state.acc.devices,
-			RailIndex:          state.minRailIndex,
+			InstanceIndex:      state.minInstanceIndex,
 		}
 		aggregates[name] = &groupingEntry{
 			representative: mergedRep,
@@ -1268,7 +1268,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// DeviceClass that a prior successful reconcile already created.
 	activeNames := make(map[string]bool, len(seen)+len(aggregates))
 	for _, entry := range seen {
-		name := fmt.Sprintf("%s-rail%d", sanitizeForName(entry.representative.GroupingName), entry.representative.RailIndex)
+		name := groupingDeviceClassName(entry.representative)
 		activeNames[name] = true
 	}
 	for _, entry := range aggregates {
@@ -1293,6 +1293,41 @@ func groupingInstanceKey(inst GroupingInstance) string {
 		key += "-numa" + nk
 	}
 	return key
+}
+
+func groupingDeviceClassName(inst GroupingInstance) string {
+	base := sanitizeForName(inst.GroupingName)
+	if inst.Rail {
+		return sanitizeDNSLabel(fmt.Sprintf("%s-rail%d", base, inst.InstanceIndex))
+	}
+
+	var suffix string
+	switch inst.Alignment {
+	case "numaNode":
+		if len(inst.NUMANodes) > 0 {
+			values := make([]string, len(inst.NUMANodes))
+			for i, value := range inst.NUMANodes {
+				values[i] = fmt.Sprintf("%d", value)
+			}
+			suffix = "numa" + strings.Join(values, "-")
+		}
+	case "pcieRoot":
+		if len(inst.PCIeRoots) > 0 {
+			suffix = "pcie-" + sanitizeForName(strings.Join(inst.PCIeRoots, "-"))
+		}
+	case "socket":
+		if len(inst.Sockets) > 0 {
+			values := make([]string, len(inst.Sockets))
+			for i, value := range inst.Sockets {
+				values[i] = fmt.Sprintf("%d", value)
+			}
+			suffix = "socket" + strings.Join(values, "-")
+		}
+	}
+	if suffix == "" {
+		suffix = fmt.Sprintf("%s%d", sanitizeForName(inst.Alignment), inst.InstanceIndex)
+	}
+	return sanitizeDNSLabel(base + "-" + suffix)
 }
 
 // buildGroupingConfig builds the opaque PartitionConfig from a grouping instance.
@@ -1416,7 +1451,9 @@ func (m *DeviceClassManager) buildGroupingDeviceClass(
 		CoordinatorDriverName + "/managed":   "true",
 		CoordinatorDriverName + "/grouping":  truncateLabel(representative.GroupingName),
 		CoordinatorDriverName + "/alignment": representative.Alignment,
-		CoordinatorDriverName + "/railIndex": fmt.Sprintf("%d", representative.RailIndex),
+	}
+	if representative.Rail {
+		labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", representative.InstanceIndex)
 	}
 	if len(representative.NUMANodes) > 0 {
 		labels[CoordinatorDriverName+"/numa"] = numaKey(representative.NUMANodes)
