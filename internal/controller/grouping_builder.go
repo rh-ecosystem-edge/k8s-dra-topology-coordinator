@@ -57,7 +57,10 @@ type GroupingInstance struct {
 // opaque configuration copied onto the generated request.
 type RequestContract struct {
 	// Class is the requested DeviceClass; empty means the topology class itself.
-	Class     string        `json:"class,omitempty"`
+	Class string `json:"class,omitempty"`
+	// Driver is the driver whose devices Class allocates; empty means the
+	// driver that publishes the topology class.
+	Driver    string        `json:"driver,omitempty"`
 	Selectors []string      `json:"selectors,omitempty"`
 	Opaque    *OpaqueConfig `json:"opaque,omitempty"`
 	// Passthrough marks the class as explicitly selected for VM passthrough.
@@ -347,6 +350,7 @@ func (b *GroupingBuilder) buildInstance(
 		}
 		inst.Requests[gd.Class] = RequestContract{
 			Class:       requestClass,
+			Driver:      gd.RequestDriver,
 			Selectors:   gd.Selectors,
 			Opaque:      gd.Opaque,
 			Passthrough: gd.Passthrough,

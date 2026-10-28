@@ -1516,7 +1516,12 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 		}
 
 		if includeNUMA && len(inst.NUMANodes) > 0 {
-			driver := m.driverForClass(driverClass)
+			// The selector is evaluated on the devices requestClass allocates,
+			// so it must use that driver's attribute domain.
+			driver := contract.Driver
+			if driver == "" {
+				driver = m.driverForClass(driverClass)
+			}
 			if attr, ok := m.rules.GetNUMAAttributeForDriver(driver); ok {
 				if !strings.Contains(attr, "/") {
 					attr = driver + "/" + attr
@@ -1556,6 +1561,11 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			for driver := range inst.DeviceCounts {
 				rawDriver := m.driverForClass(driver)
 				if driversWithAttribute[baseDriverName(rawDriver)] {
+					if !requestDriverPublishes(inst.Requests[driver].Driver, rawDriver, rule.Attribute) {
+						klog.V(2).Infof("Grouping %q: skipping %s in %s alignment; request driver %q may not publish it",
+							inst.GroupingName, inst.requestClass(driver), rule.Attribute, inst.Requests[driver].Driver)
+						continue
+					}
 					requestClass := inst.requestClass(driver)
 					constraintRequests = append(constraintRequests, requestClass)
 				}
@@ -1702,6 +1712,19 @@ func (m *DeviceClassManager) cleanupStaleGroupingDeviceClasses(ctx context.Conte
 		}
 	}
 	return nil
+}
+
+// requestDriverPublishes reports whether a request served by requestDriver can
+// be expected to publish attribute. matchAttribute fails when any allocated
+// device lacks the attribute, so a driver-specific attribute is only used when
+// the request driver owns that domain; standard resource.kubernetes.io
+// attributes describe the physical device and carry over.
+func requestDriverPublishes(requestDriver, sourceDriver, attribute string) bool {
+	if requestDriver == "" || baseDriverName(requestDriver) == baseDriverName(sourceDriver) {
+		return true
+	}
+	domain, _, _ := strings.Cut(attribute, "/")
+	return domain == "resource.kubernetes.io" || baseDriverName(domain) == baseDriverName(requestDriver)
 }
 
 // driverForClass returns the raw driver name for a DeviceClass name.

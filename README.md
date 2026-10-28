@@ -196,7 +196,7 @@ data:
 
 The aggregate DeviceClass keeps the grouping name. Explicit rail instances are named `<grouping>-rail<N>` and carry the `railIndex` label. Ordinary grouping instances retain their locality meaning in the name, such as `<grouping>-numa<N>`, `<grouping>-pcie-<root>`, or `<grouping>-socket<N>`, and do not carry `railIndex`. Fixed PCIe partition classes use their PCIe-root name directly and also do not use `railIndex`. This is a breaking rename for previously generated non-rail and fixed-partition `-rail<N>` classes. During an upgrade, the coordinator pauses publication while those legacy classes exist; remove the legacy classes (or uninstall/reinstall the release), update claims to the new topology-specific names, then resume reconciliation.
 
-Passthrough devices must declare their VFIO contract explicitly: set `requestClass`, `selectors`, or `opaque` on every device with `passthrough: true`, otherwise the ConfigMap is rejected. The coordinator no longer injects VFIO configuration from driver names, so existing passthrough ConfigMaps must be updated before VMs using them restart. `requestClass` must be served by the same driver as `class`, because NUMA selectors use the source driver's attribute namespace.
+Passthrough devices must declare their VFIO contract explicitly: set `requestClass`, `selectors`, or `opaque` on every device with `passthrough: true`, otherwise the ConfigMap is rejected. The coordinator no longer injects VFIO configuration from driver names, so existing passthrough ConfigMaps must be updated before VMs using them restart. If `requestClass` is served by a different driver than `class`, also set `requestDriver` (see below); otherwise the generated NUMA selector uses the attribute namespace of the driver that publishes `class`.
 
 Grouping offerings default to `mode: container`, which keeps ordinary Pod claims free of VM passthrough configuration. Set `mode: passthrough` and mark only the physical devices that should be exposed to a VM:
 
@@ -226,6 +226,22 @@ data:
 ```
 
 `class` identifies the topology class used to find compatible devices. `requestClass` optionally selects a different driver-owned DeviceClass in the expanded claim; it defaults to `class`. `selectors` are copied to that sub-request, and `opaque` is copied unchanged to the matching request configuration. The coordinator does not interpret opaque parameters or infer VFIO from a class name.
+
+`requestDriver` (optional, requires `requestClass`) names the driver whose devices `requestClass` allocates. Set it when that driver differs from the one that publishes `class`:
+
+- The NUMA selector on the generated request uses `requestDriver`'s NUMA attribute. That attribute comes from a topology rule with `mapsTo: numaNode` for `requestDriver`, and the standard `resource.kubernetes.io/numaNode` is used when there is no such rule. Adding a rule for `requestDriver` can also affect automatic partitions and which DeviceClass is chosen for that driver.
+- A request is left out of an alignment unless its attribute is a standard `resource.kubernetes.io/` attribute (which describes the physical device) or belongs to `requestDriver`'s own domain, because `matchAttribute` cannot be satisfied if an allocated device lacks the attribute. If fewer than two requests remain, the alignment is dropped.
+- When `opaque` is set, `opaque.driver` must equal `requestDriver`.
+- An older controller ignores `requestDriver` and builds the selector from the source driver.
+
+```yaml
+devices: |
+  - class: gpu.example.com
+    requestClass: gpu-vfio.example.com
+    requestDriver: vfio.example.com
+    count: 1
+    passthrough: true
+```
 
 For an NVMe passthrough offering, keep topology discovery on `dra.nvme` but request the driver's VFIO class:
 

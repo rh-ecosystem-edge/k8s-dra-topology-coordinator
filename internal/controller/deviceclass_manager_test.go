@@ -2058,3 +2058,122 @@ func TestDeviceIntersectionState_UnparseableCapacityDropped(t *testing.T) {
 	assert.Equal(t, 1, counts["X"], "driver count is unaffected by an unparseable capacity value")
 	assert.NotContains(t, cap, "X", "an unparseable capacity value must not produce a fabricated minimum")
 }
+
+func requestDriverRules(t *testing.T, data ...map[string]string) *TopologyRuleStore {
+	t.Helper()
+	rules := NewTopologyRuleStore()
+	for i, d := range data {
+		require.NoError(t, rules.LoadFromConfigMap(makeTopologyRuleConfigMap(fmt.Sprintf("rule-%d", i), "default", d)))
+	}
+	return rules
+}
+
+func TestDeviceClassManager_NUMASelectorUsesRequestDriver(t *testing.T) {
+	sourceRule := map[string]string{"attribute": "gpu.example.com/numaNode", "type": "int", "driver": "gpu.example.com", "mapsTo": "numaNode"}
+	tests := []struct {
+		name   string
+		rules  []map[string]string
+		driver string
+		want   string
+	}{
+		{"request driver rule", []map[string]string{sourceRule, {"attribute": "vfio.example.com/numa", "type": "int", "driver": "vfio.example.com", "mapsTo": "numaNode"}}, "vfio.example.com", `device.attributes["vfio.example.com"].numa`},
+		{"unqualified attribute gets request driver prefix", []map[string]string{sourceRule, {"attribute": "numaID", "type": "int", "driver": "vfio.example.com", "mapsTo": "numaNode"}}, "vfio.example.com", `device.attributes["vfio.example.com"].numaID`},
+		{"no request driver rule falls back to standard attribute", []map[string]string{sourceRule}, "vfio.example.com", `device.attributes["resource.kubernetes.io"].numaNode`},
+		{"empty request driver keeps source driver", []map[string]string{sourceRule}, "", `device.attributes["gpu.example.com"].numaNode`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, requestDriverRules(t, tt.rules...))
+			config := manager.buildGroupingConfig(GroupingInstance{
+				NUMANodes:    []int64{0},
+				DeviceCounts: map[string]int{"gpu.example.com": 1},
+				Requests: map[string]RequestContract{
+					"gpu.example.com": {Class: "vfio.gpu.example.com", Driver: tt.driver},
+				},
+			})
+			require.Len(t, config.SubResources, 1)
+			require.Len(t, config.SubResources[0].Selectors, 1)
+			assert.Contains(t, config.SubResources[0].Selectors[0], tt.want)
+		})
+	}
+}
+
+func TestDeviceClassManager_AlignmentSkipsRequestDriverWithoutAttribute(t *testing.T) {
+	nvlink := int64(1)
+	devices := func() []TopologyDevice {
+		root := "pci0000:00"
+		attrs := map[string]DeviceAttributeValue{"gpu.example.com/nvlink": {IntValue: &nvlink}}
+		return []TopologyDevice{
+			{DriverName: "gpu.example.com", DeviceName: "gpu-0", PCIeRoot: &root, ExtendedAttributes: attrs},
+			{DriverName: "nic.example.com", DeviceName: "nic-0", PCIeRoot: &root, ExtendedAttributes: attrs},
+		}
+	}
+	rules := requestDriverRules(t,
+		map[string]string{"attribute": AttrPCIeRoot, "type": "string", "driver": "nic.example.com", "constraint": "match"},
+		map[string]string{"attribute": "gpu.example.com/nvlink", "type": "int", "driver": "nic.example.com", "constraint": "match"},
+	)
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, rules)
+	build := func(driver string) PartitionConfig {
+		return manager.buildGroupingConfig(GroupingInstance{
+			Alignment:    "pcieRoot",
+			Devices:      devices(),
+			DeviceCounts: map[string]int{"gpu.example.com": 1, "nic.example.com": 1},
+			Requests: map[string]RequestContract{
+				"gpu.example.com": {Class: "vfio.gpu.example.com", Driver: driver},
+			},
+		})
+	}
+	attributes := func(c PartitionConfig) map[string][]string {
+		out := map[string][]string{}
+		for _, a := range c.Alignments {
+			out[a.Attribute] = a.Requests
+		}
+		return out
+	}
+
+	same := attributes(build(""))
+	assert.Len(t, same[AttrPCIeRoot], 2)
+	assert.Len(t, same["gpu.example.com/nvlink"], 2)
+
+	other := attributes(build("vfio.example.com"))
+	assert.Len(t, other[AttrPCIeRoot], 2, "standard attributes carry over to the request driver")
+	assert.NotContains(t, other, "gpu.example.com/nvlink", "driver-specific attribute is not assumed on the request driver")
+
+	owned := attributes(manager.buildGroupingConfig(GroupingInstance{
+		Alignment:    "pcieRoot",
+		Devices:      devices(),
+		DeviceCounts: map[string]int{"gpu.example.com": 1, "nic.example.com": 1},
+		Requests: map[string]RequestContract{
+			"gpu.example.com": {Class: "vfio.gpu.example.com", Driver: "gpu.example.com"},
+		},
+	}))
+	assert.Len(t, owned["gpu.example.com/nvlink"], 2, "source driver keeps its own alignment")
+}
+
+func TestRequestDriverPublishes(t *testing.T) {
+	tests := []struct {
+		name                  string
+		requestDriver, source string
+		attribute             string
+		want                  bool
+	}{
+		{"no request driver", "", "gpu.example.com", "gpu.example.com/nvlink", true},
+		{"same driver", "gpu.example.com", "gpu.example.com", "gpu.example.com/nvlink", true},
+		{"standard attribute carries over", "vfio.example.com", "gpu.example.com", AttrPCIeRoot, true},
+		{"request driver owns the domain", "vfio.example.com", "gpu.example.com", "vfio.example.com/group", true},
+		{"source-only domain", "vfio.example.com", "gpu.example.com", "gpu.example.com/nvlink", false},
+		{"unqualified attribute", "vfio.example.com", "gpu.example.com", "nvlink", false},
+		{"suffixed request driver owns the domain", "vfio.example.com/v2", "gpu.example.com", "vfio.example.com/group", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, requestDriverPublishes(tt.requestDriver, tt.source, tt.attribute))
+		})
+	}
+}
+
+func TestGroupingRequestContractKey_IncludesRequestDriver(t *testing.T) {
+	a := GroupingInstance{Requests: map[string]RequestContract{"gpu.example.com": {Class: "v", Driver: "one.example.com"}}}
+	b := GroupingInstance{Requests: map[string]RequestContract{"gpu.example.com": {Class: "v", Driver: "two.example.com"}}}
+	assert.NotEqual(t, groupingRequestContractKey(a), groupingRequestContractKey(b))
+}
