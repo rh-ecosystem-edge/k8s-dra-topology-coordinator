@@ -198,6 +198,8 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	var explicitConfigs []resourcev1.DeviceClaimConfiguration
 	anyExpanded := false
 	expansionMap := make(map[string][]string) // original request name → expanded request names
+	// original request name → alignment attribute → expanded names that publish it
+	alignedMap := make(map[string]map[string][]string)
 
 	for _, req := range requests {
 		if req.Exactly == nil {
@@ -232,6 +234,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			expandedNames = append(expandedNames, sr.Name)
 		}
 		expansionMap[req.Name] = expandedNames
+		alignedMap[req.Name] = alignedRequests(subRequests, partitionConfig)
 	}
 
 	if !anyExpanded {
@@ -242,7 +245,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	}
 
 	var patches []jsonPatch
-	remappedConstraints, constraintsChanged := remapConstraints(claim.Spec.Devices.Constraints, expansionMap)
+	remappedConstraints, constraintsChanged := remapConstraints(claim.Spec.Devices.Constraints, expansionMap, alignedMap)
 	remappedConfigs, configsChanged := remapConfigs(claim.Spec.Devices.Config, expansionMap)
 
 	// Replace requests
@@ -586,7 +589,32 @@ func validateExpandedRequestNames(requests []resourcev1.DeviceRequest) error {
 	return nil
 }
 
-func remapConstraints(constraints []resourcev1.DeviceConstraint, mapping map[string][]string) ([]resourcev1.DeviceConstraint, bool) {
+// alignedRequests maps each alignment attribute of config to the expanded
+// request names whose device class takes part in that alignment.
+func alignedRequests(subRequests []resourcev1.DeviceRequest, config *controller.PartitionConfig) map[string][]string {
+	aligned := make(map[string][]string, len(config.Alignments))
+	for _, alignment := range config.Alignments {
+		for _, sub := range subRequests {
+			if sub.Exactly == nil {
+				continue
+			}
+			class := sub.Exactly.DeviceClassName
+			for _, reqName := range alignment.Requests {
+				if reqName == class || reqName == sanitizeDeviceClassName(class) {
+					aligned[alignment.Attribute] = append(aligned[alignment.Attribute], sub.Name)
+					break
+				}
+			}
+		}
+	}
+	return aligned
+}
+
+// remapConstraints rewrites constraint request references to the expanded
+// request names. A matchAttribute constraint that targets an alignment
+// attribute is narrowed to the sub-requests that publish it; spreading it to
+// e.g. CPU or memory requests would make the claim unsatisfiable.
+func remapConstraints(constraints []resourcev1.DeviceConstraint, mapping map[string][]string, aligned map[string]map[string][]string) ([]resourcev1.DeviceConstraint, bool) {
 	if len(constraints) == 0 {
 		return nil, false
 	}
@@ -600,6 +628,11 @@ func remapConstraints(constraints []resourcev1.DeviceConstraint, mapping map[str
 			if !ok {
 				copyConstraint.Requests = append(copyConstraint.Requests, request)
 				continue
+			}
+			if constraint.MatchAttribute != nil {
+				if narrowed := aligned[request][string(*constraint.MatchAttribute)]; len(narrowed) > 0 {
+					expanded = narrowed
+				}
 			}
 			copyConstraint.Requests = append(copyConstraint.Requests, expanded...)
 			changed = true

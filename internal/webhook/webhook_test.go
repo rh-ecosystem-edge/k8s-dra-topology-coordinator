@@ -527,6 +527,46 @@ func TestExpansionRemapsExistingConstraintAndConfigReferences(t *testing.T) {
 	assert.Contains(t, string(configBytes), "partition-gpu-amd-com")
 }
 
+func TestUserConstraintNarrowedToAlignedSubRequests(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "gpu.amd.com", Count: 1},
+			{DeviceClass: "nic.example.com", Count: 1},
+			{DeviceClass: "cpu.example.com", Count: 1},
+		},
+		Alignments: []controller.AlignmentConfig{{
+			Attribute:   controller.AttrPCIeRoot,
+			Requests:    []string{"gpu.amd.com", "nic.example.com"},
+			Enforcement: controller.EnforcementRequired,
+		}},
+	}
+	dc := makePartitionDeviceClass("narrow-constraint", partConfig)
+	expander := NewClaimExpander(fake.NewSimpleClientset(dc))
+	attribute := resourcev1.FullyQualifiedName(controller.AttrPCIeRoot)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+		Requests: []resourcev1.DeviceRequest{{
+			Name:    "vm",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+		}},
+		Constraints: []resourcev1.DeviceConstraint{{Requests: []string{"vm"}, MatchAttribute: &attribute}},
+	}}}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	var constraints []resourcev1.DeviceConstraint
+	for _, patch := range patches {
+		if patch.Path == "/spec/devices/constraints" {
+			var ok bool
+			constraints, ok = patch.Value.([]resourcev1.DeviceConstraint)
+			require.True(t, ok)
+		}
+	}
+	require.NotEmpty(t, constraints)
+	// The user's constraint is the first entry; generated alignments follow.
+	assert.ElementsMatch(t, []string{"vm-gpu-amd-com", "vm-nic-example-com"}, constraints[0].Requests)
+}
+
 func TestPassthroughConfigsHaveStableOrder(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
