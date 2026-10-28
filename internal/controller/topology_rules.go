@@ -2,10 +2,12 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	klog "k8s.io/klog/v2"
 )
 
@@ -233,6 +235,8 @@ func (s *TopologyRuleStore) GetDeviceClassForDriver(driverName string) string {
 	return driverName
 }
 
+var celIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // BuildNUMACELSelector generates a CEL expression that pins devices from a
 // specific driver to the given NUMA node value(s), using the driver's own
 // attribute namespace. For example:
@@ -242,6 +246,10 @@ func (s *TopologyRuleStore) GetDeviceClassForDriver(driverName string) string {
 //
 //	attribute="dra.cpu/numaNodeID", values=[0, 1]
 //	→ device.attributes["dra.cpu"].numaNodeID == 0 || device.attributes["dra.cpu"].numaNodeID == 1
+//
+// Returns "" (and logs) when the attribute is not a valid domain/identifier
+// pair or there are no values, so callers skip the selector. The domain and
+// name are interpolated into CEL, so they are validated strictly.
 func BuildNUMACELSelector(attribute string, numaValues []int64) string {
 	parts := strings.SplitN(attribute, "/", 2)
 	if len(parts) != 2 {
@@ -250,7 +258,16 @@ func BuildNUMACELSelector(attribute string, numaValues []int64) string {
 	domain := parts[0]
 	name := parts[1]
 
-	attrRef := fmt.Sprintf(`device.attributes["%s"].%s`, domain, name)
+	if len(numaValues) == 0 {
+		klog.Warningf("Skipping NUMA CEL selector for %q: no NUMA values", attribute)
+		return ""
+	}
+	if errs := validation.IsDNS1123Subdomain(domain); len(errs) > 0 || !celIdentRe.MatchString(name) {
+		klog.Warningf("Skipping NUMA CEL selector for %q: invalid domain or attribute name", attribute)
+		return ""
+	}
+
+	attrRef := fmt.Sprintf(`device.attributes[%q].%s`, domain, name)
 	hasGuard := fmt.Sprintf(`has(%s)`, attrRef)
 
 	if len(numaValues) == 1 {
@@ -300,6 +317,18 @@ func parseTopologyRule(cm *corev1.ConfigMap) (TopologyRule, error) {
 		rule.MapsTo = StandardTopologyAttribute(mapsTo)
 	default:
 		return rule, fmt.Errorf("invalid mapsTo %q: must be numaNode, pcieRoot, socket, or empty", mapsTo)
+	}
+
+	// A numaNode rule feeds BuildNUMACELSelector; reject attributes that can't
+	// form a valid selector. Other rules are not validated to keep old ConfigMaps working.
+	if rule.MapsTo == MapsToNUMANode {
+		q := attr
+		if !strings.Contains(q, "/") {
+			q = driver + "/" + q
+		}
+		if BuildNUMACELSelector(q, []int64{0}) == "" {
+			return rule, fmt.Errorf("invalid attribute %q for mapsTo numaNode: must be <dns-domain>/<identifier>", attr)
+		}
 	}
 
 	partitioning := cm.Data["partitioning"]
