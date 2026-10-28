@@ -26,7 +26,7 @@ The webhook runs on every replica and:
 
 - expands a partition `ResourceClaim` into its driver-specific sub-resource requests;
 - adds per-driver topology selectors and any configured `matchAttribute` constraints;
-- injects VFIO configuration for supported passthrough devices when needed; and
+- copies explicitly declared driver configuration for passthrough requests; and
 - rewrites Pod and KubeVirt VMI references to the expanded request names.
 
 Ordinary DRA claims that do not reference a coordinator `PartitionConfig` pass through unchanged. No scheduler plugin is required.
@@ -198,19 +198,60 @@ Grouping offerings default to `mode: container`, which keeps ordinary Pod claims
 
 ```yaml
 data:
-  name: gpu-nic-vfio
+  name: amd-gim-gpu-nic-vfio
+  mode: passthrough
+  alignment: pcieRoot
+  devices: |
+    - class: gpu.amd.com
+      requestClass: gpu.amd.com
+      selectors:
+        - 'device.attributes["gpu.amd.com"].type == "vfio"'
+        - 'device.attributes["gpu.amd.com"].isVF == true'
+      count: 1
+      passthrough: true
+    - class: sriovnetwork.k8snetworkplumbingwg.io
+      requestClass: sriovnetwork.k8snetworkplumbingwg.io
+      count: 1
+      passthrough: true
+      opaque:
+        driver: sriovnetwork.k8snetworkplumbingwg.io
+        parameters:
+          apiVersion: sriovnetwork.k8snetworkplumbingwg.io/v1alpha1
+          kind: VfConfig
+          driver: vfio-pci
+```
+
+`class` identifies the topology class used to find compatible devices. `requestClass` optionally selects a different driver-owned DeviceClass in the expanded claim; it defaults to `class`. `selectors` are copied to that sub-request, and `opaque` is copied unchanged to the matching request configuration. The coordinator does not interpret opaque parameters or infer VFIO from a class name.
+
+For an NVMe passthrough offering, keep topology discovery on `dra.nvme` but request the driver's VFIO class:
+
+```yaml
+devices: |
+  - class: dra.nvme
+    requestClass: dra.nvme-vfio
+    count: 1
+    passthrough: true
+```
+
+The `passthrough` flag controls VM-oriented request splitting and KubeVirt host-device mapping. Actual binding, CDI creation, and cleanup remain responsibilities of the selected DRA driver.
+
+```yaml
+data:
+  name: nvidia-gpu-nic-vfio
   mode: passthrough
   alignment: pcieRoot
   devices: |
     - class: gpu.nvidia.com
+      requestClass: vfio.gpu.nvidia.com
       count: 2
       passthrough: true
     - class: rdma.mellanox.com
+      requestClass: rdma.mellanox.com
       count: 2
       passthrough: true
 ```
 
-Automatically generated partition classes remain container offerings. Passthrough is injected only for explicitly marked passthrough offerings.
+Automatically generated partition classes remain container offerings. Passthrough configuration is copied only when it is explicitly declared on the grouping sub-resource; the webhook never synthesizes a driver configuration from a name.
 
 ### Intent-based offerings
 

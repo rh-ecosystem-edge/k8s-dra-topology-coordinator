@@ -41,6 +41,13 @@ type GroupingInstance struct {
 	DeviceCapacity map[string]map[string]string
 	// PassthroughClasses marks device classes explicitly selected for VM passthrough.
 	PassthroughClasses map[string]bool
+	// RequestClasses maps topology classes to the driver-owned classes used in
+	// expanded claims. A missing entry means the topology class is requested.
+	RequestClasses map[string]string
+	// RequestSelectors and RequestOpaque carry explicit per-request driver
+	// contracts from the grouping ConfigMap.
+	RequestSelectors map[string][]string
+	RequestOpaque    map[string]*OpaqueConfig
 	// Devices lists the topology devices in this instance.
 	Devices []TopologyDevice
 
@@ -49,6 +56,45 @@ type GroupingInstance struct {
 
 	// InstanceIndex is the generic deterministic index of this instance.
 	InstanceIndex int
+}
+
+func cloneRequestClasses(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneRequestSelectors(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func cloneRequestOpaque(in map[string]*OpaqueConfig) map[string]*OpaqueConfig {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]*OpaqueConfig, len(in))
+	for key, value := range in {
+		if value == nil {
+			continue
+		}
+		out[key] = &OpaqueConfig{
+			Driver:     value.Driver,
+			Parameters: append([]byte(nil), value.Parameters...),
+		}
+	}
+	return out
 }
 
 // GroupingResult holds all computed grouping instances for a single node.
@@ -293,6 +339,9 @@ func (b *GroupingBuilder) buildInstance(
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),
 		PassthroughClasses: make(map[string]bool),
+		RequestClasses:     make(map[string]string),
+		RequestSelectors:   make(map[string][]string),
+		RequestOpaque:      make(map[string]*OpaqueConfig),
 		Devices:            devices,
 		ExtendedAttributes: make(map[string]DeviceAttributeValue),
 	}
@@ -309,6 +358,20 @@ func (b *GroupingBuilder) buildInstance(
 
 	// Apply capacity from grouping definition for shared devices
 	for _, gd := range grouping.Devices {
+		requestClass := gd.RequestClass
+		if requestClass == "" {
+			requestClass = gd.Class
+		}
+		inst.RequestClasses[gd.Class] = requestClass
+		if len(gd.Selectors) > 0 {
+			inst.RequestSelectors[gd.Class] = append([]string(nil), gd.Selectors...)
+		}
+		if gd.Opaque != nil {
+			inst.RequestOpaque[gd.Class] = &OpaqueConfig{
+				Driver:     gd.Opaque.Driver,
+				Parameters: append([]byte(nil), gd.Opaque.Parameters...),
+			}
+		}
 		if gd.Passthrough {
 			inst.PassthroughClasses[gd.Class] = true
 		}

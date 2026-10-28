@@ -28,6 +28,10 @@ import (
 // makePartitionDeviceClass creates a DeviceClass with a PartitionConfig opaque config.
 func makePartitionDeviceClass(name string, config controller.PartitionConfig) *resourcev1.DeviceClass {
 	configJSON, _ := json.Marshal(config)
+	return makePartitionDeviceClassJSON(name, configJSON)
+}
+
+func makePartitionDeviceClassJSON(name string, configJSON []byte) *resourcev1.DeviceClass {
 	return &resourcev1.DeviceClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -280,21 +284,21 @@ func TestContainerOfferingDoesNotInjectVFIO(t *testing.T) {
 	}
 }
 
-func TestPassthroughOfferingInjectsVFIO(t *testing.T) {
+func TestPassthroughOfferingWithoutExplicitConfigDoesNotInjectVFIO(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
 		Mode: controller.OfferingModePassthrough,
 		SubResources: []controller.SubResourceConfig{
-			{DeviceClass: "rdma.mellanox.com", Count: 1, Passthrough: true},
+			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1, Passthrough: true},
 		},
 	}
-	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-rdma", partConfig))
+	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-rdma-no-config", partConfig))
 	expander := NewClaimExpander(client)
 	claim := &resourcev1.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "vfio-claim", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "vfio-claim-no-config", Namespace: "default"},
 		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
 			Name:    "partition",
-			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-rdma", Count: 1},
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "vfio-rdma-no-config", Count: 1},
 		}}}},
 	}
 
@@ -302,13 +306,57 @@ func TestPassthroughOfferingInjectsVFIO(t *testing.T) {
 	require.True(t, resp.Response.Allowed)
 	var patches []jsonPatch
 	require.NoError(t, json.Unmarshal(resp.Response.Patch, &patches))
-	foundConfig := false
 	for _, patch := range patches {
-		if patch.Path == "/spec/devices/config" {
-			foundConfig = true
+		assert.NotEqual(t, "/spec/devices/config", patch.Path,
+			"passthrough alone must not synthesize a driver configuration")
+	}
+}
+
+func TestPassthroughOfferingCopiesExplicitOpaqueConfigToExpandedRequests(t *testing.T) {
+	configJSON := []byte(`{
+		"kind":"PartitionConfig",
+		"mode":"passthrough",
+		"subResources":[{
+			"deviceClass":"gpu.amd.com",
+			"count":1,
+			"passthrough":true,
+			"opaque":{
+				"driver":"gpu.resource.amd.com",
+				"parameters":{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}
+			}
+		}]
+	}`)
+	client := fake.NewSimpleClientset(makePartitionDeviceClassJSON("amd-gim-vfio", configJSON))
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "amd-gim-claim", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "amd-gim-vfio", Count: 1},
+		}}}},
+	}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	var configPatch *jsonPatch
+	for i := range patches {
+		if patches[i].Path == "/spec/devices/config" {
+			configPatch = &patches[i]
+			break
 		}
 	}
-	assert.True(t, foundConfig)
+	require.NotNil(t, configPatch)
+	var configs []resourcev1.DeviceClaimConfiguration
+	configBytes, err := json.Marshal(configPatch.Value)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(configBytes, &configs))
+	require.Len(t, configs, 1)
+	require.NotNil(t, configs[0].Opaque)
+	assert.Equal(t, "gpu.resource.amd.com", configs[0].Opaque.Driver)
+	assert.Equal(t, []string{"partition-gpu-amd-com"}, configs[0].Requests)
+	assert.JSONEq(t,
+		`{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`,
+		string(configs[0].Opaque.Parameters.Raw))
 }
 
 func TestPassthroughConfigsHaveStableOrder(t *testing.T) {
@@ -316,8 +364,14 @@ func TestPassthroughConfigsHaveStableOrder(t *testing.T) {
 		Kind: "PartitionConfig",
 		Mode: controller.OfferingModePassthrough,
 		SubResources: []controller.SubResourceConfig{
-			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1, Passthrough: true},
-			{DeviceClass: "rdma.mellanox.com", Count: 1, Passthrough: true},
+			{DeviceClass: "sriovnetwork.k8snetworkplumbingwg.io", Count: 1, Passthrough: true, Opaque: &controller.OpaqueConfig{
+				Driver:     "sriovnetwork.k8snetworkplumbingwg.io",
+				Parameters: json.RawMessage(`{"apiVersion":"sriovnetwork.k8snetworkplumbingwg.io/v1alpha1","kind":"VfConfig","driver":"vfio-pci"}`),
+			}},
+			{DeviceClass: "rdma.mellanox.com", Count: 1, Passthrough: true, Opaque: &controller.OpaqueConfig{
+				Driver:     "rdma.mellanox.com",
+				Parameters: json.RawMessage(`{"apiVersion":"rdma.example/v1","kind":"VfioConfig"}`),
+			}},
 		},
 	}
 	client := fake.NewSimpleClientset(makePartitionDeviceClass("vfio-order", partConfig))
@@ -1127,45 +1181,6 @@ func TestSanitizeDeviceClassName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-func TestBuildVfioConfig_AMDGpu(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	expander := NewClaimExpander(client)
-
-	cfg := expander.buildVfioConfig("gpu.amd.com")
-	require.NotNil(t, cfg, "AMD GPU should get VFIO config")
-	require.NotNil(t, cfg.Opaque)
-	assert.Equal(t, "gpu.amd.com", cfg.Opaque.Driver)
-	assert.Contains(t, string(cfg.Opaque.Parameters.Raw), "VfioDeviceConfig")
-}
-
-func TestBuildVfioConfig_SriovNic(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	expander := NewClaimExpander(client)
-
-	cfg := expander.buildVfioConfig("sriovnetwork.k8snetworkplumbingwg.io")
-	require.NotNil(t, cfg, "SR-IOV NIC should get VFIO config")
-	require.NotNil(t, cfg.Opaque)
-	assert.Equal(t, "sriovnetwork.k8snetworkplumbingwg.io", cfg.Opaque.Driver)
-	assert.Contains(t, string(cfg.Opaque.Parameters.Raw), "vfio-pci")
-}
-
-func TestBuildVfioConfig_UnknownDriver(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	expander := NewClaimExpander(client)
-
-	cfg := expander.buildVfioConfig("dra.cpu")
-	assert.Nil(t, cfg, "CPU driver should not get VFIO config")
-}
-
-func TestBuildVfioConfig_RdmaDriver(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	expander := NewClaimExpander(client)
-
-	cfg := expander.buildVfioConfig("rdma.mellanox.com")
-	require.NotNil(t, cfg, "RDMA driver should get VFIO config")
-	assert.Contains(t, string(cfg.Opaque.Parameters.Raw), "vfio-pci")
 }
 
 func TestSanitizeForRequestName(t *testing.T) {

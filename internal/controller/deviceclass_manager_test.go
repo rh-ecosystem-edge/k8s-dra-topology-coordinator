@@ -129,6 +129,35 @@ func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
 	}
 }
 
+func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	instance := GroupingInstance{
+		Mode:           OfferingModePassthrough,
+		DeviceCounts:   map[string]int{"gpu.nvidia.com": 1},
+		RequestClasses: map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
+		RequestSelectors: map[string][]string{
+			"gpu.nvidia.com": {`device.attributes["gpu.nvidia.com"].type == "vfio"`},
+		},
+		RequestOpaque: map[string]*OpaqueConfig{
+			"gpu.nvidia.com": {
+				Driver:     "gpu.nvidia.com",
+				Parameters: []byte(`{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`),
+			},
+		},
+		PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+	}
+
+	config := manager.buildGroupingConfig(instance)
+	require.Len(t, config.SubResources, 1)
+	subResource := config.SubResources[0]
+	assert.Equal(t, "vfio.gpu.nvidia.com", subResource.DeviceClass)
+	assert.Equal(t, []string{`device.attributes["gpu.nvidia.com"].type == "vfio"`}, subResource.Selectors)
+	assert.True(t, subResource.Passthrough)
+	require.NotNil(t, subResource.Opaque)
+	assert.Equal(t, "gpu.nvidia.com", subResource.Opaque.Driver)
+	assert.JSONEq(t, `{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`, string(subResource.Opaque.Parameters))
+}
+
 func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())

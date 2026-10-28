@@ -138,6 +138,56 @@ func TestParseDeviceGrouping_PassthroughOffering(t *testing.T) {
 	assert.True(t, grouping.Devices[0].Passthrough)
 }
 
+func TestParseDeviceGrouping_ExplicitRequestContract(t *testing.T) {
+	data := validGroupingData("amd-gim-vfio")
+	data["mode"] = "passthrough"
+	data["devices"] = `
+- class: gpu.amd.com
+  requestClass: gpu.amd.com
+  count: 1
+  passthrough: true
+  selectors:
+    - 'device.attributes["gpu.amd.com"].type == "vfio"'
+    - 'device.attributes["gpu.amd.com"].isVF == true'
+  opaque:
+    driver: gpu.resource.amd.com
+    parameters:
+      apiVersion: gpu.resource.amd.com/v1alpha1
+      kind: VfioDeviceConfig
+`
+
+	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("amd-gim-vfio", data))
+	require.NoError(t, err)
+	require.Len(t, grouping.Devices, 1)
+	device := grouping.Devices[0]
+	assert.Equal(t, "gpu.amd.com", device.Class)
+	assert.Equal(t, "gpu.amd.com", device.RequestClass)
+	assert.Equal(t, []string{
+		`device.attributes["gpu.amd.com"].type == "vfio"`,
+		`device.attributes["gpu.amd.com"].isVF == true`,
+	}, device.Selectors)
+	require.NotNil(t, device.Opaque)
+	assert.Equal(t, "gpu.resource.amd.com", device.Opaque.Driver)
+	assert.JSONEq(t, `{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`, string(device.Opaque.Parameters))
+}
+
+func TestParseDeviceGrouping_RejectsOpaqueConfigOutsidePassthrough(t *testing.T) {
+	data := validGroupingData("container-with-opaque")
+	data["devices"] = `
+- class: gpu.amd.com
+  count: 1
+  opaque:
+    driver: gpu.resource.amd.com
+    parameters:
+      apiVersion: gpu.resource.amd.com/v1alpha1
+      kind: VfioDeviceConfig
+`
+
+	_, err := parseDeviceGrouping(makeGroupingConfigMap("container-with-opaque", data))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires passthrough")
+}
+
 func TestParseDeviceGrouping_RailOffering(t *testing.T) {
 	data := validGroupingData("gpu-nic-pair")
 	data["rail"] = "true"

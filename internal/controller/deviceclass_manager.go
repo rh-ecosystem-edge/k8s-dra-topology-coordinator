@@ -72,6 +72,44 @@ type SubResourceConfig struct {
 	// When set, the webhook adds a CEL selector to filter by partition type
 	// (e.g., "SPX" for full GPU, "DPX" for half, "CPX" for eighth).
 	PartitionMode string `json:"partitionMode,omitempty"`
+	// Opaque is an explicit driver-owned configuration copied to the matching
+	// expanded request. The coordinator does not interpret its parameters.
+	Opaque *OpaqueConfig `json:"opaque,omitempty"`
+}
+
+// Validate checks the coordinator-owned portions of a partition contract.
+// Driver-specific opaque parameters are intentionally not interpreted here.
+func (c *PartitionConfig) Validate() error {
+	if c == nil {
+		return fmt.Errorf("partition config is nil")
+	}
+	if c.Kind != "PartitionConfig" {
+		return fmt.Errorf("kind must be PartitionConfig")
+	}
+	if c.Mode != "" && c.Mode != OfferingModeContainer && c.Mode != OfferingModePassthrough {
+		return fmt.Errorf("invalid mode %q", c.Mode)
+	}
+	for i, sr := range c.SubResources {
+		if sr.DeviceClass == "" {
+			return fmt.Errorf("subResources[%d] missing deviceClass", i)
+		}
+		if sr.Count < 1 {
+			return fmt.Errorf("subResources[%d] count must be positive", i)
+		}
+		if sr.Opaque == nil {
+			continue
+		}
+		if sr.Opaque.Driver == "" {
+			return fmt.Errorf("subResources[%d] opaque config missing driver", i)
+		}
+		if len(sr.Opaque.Parameters) == 0 {
+			return fmt.Errorf("subResources[%d] opaque config missing parameters", i)
+		}
+		if c.Mode != OfferingModePassthrough || !sr.Passthrough {
+			return fmt.Errorf("subResources[%d] opaque config requires passthrough mode and passthrough=true", i)
+		}
+	}
+	return nil
 }
 
 // AlignmentConfig defines a matchAttribute constraint for the combined claim.
@@ -1251,6 +1289,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		alignment        string
 		mode             OfferingMode
 		passthrough      map[string]bool
+		requestClasses   map[string]string
+		requestSelectors map[string][]string
+		requestOpaque    map[string]*OpaqueConfig
 		intent           IntentMetadata // identical across instances, per the note above
 		acc              *deviceIntersectionState
 		minInstanceIndex int
@@ -1266,6 +1307,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				alignment:        entry.representative.Alignment,
 				mode:             entry.representative.Mode,
 				passthrough:      make(map[string]bool, len(entry.representative.PassthroughClasses)),
+				requestClasses:   cloneRequestClasses(entry.representative.RequestClasses),
+				requestSelectors: cloneRequestSelectors(entry.representative.RequestSelectors),
+				requestOpaque:    cloneRequestOpaque(entry.representative.RequestOpaque),
 				intent:           entry.representative.Intent,
 				acc:              newDeviceIntersectionState(),
 				minInstanceIndex: entry.representative.InstanceIndex,
@@ -1289,6 +1333,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			Alignment:          state.alignment,
 			Mode:               state.mode,
 			PassthroughClasses: state.passthrough,
+			RequestClasses:     state.requestClasses,
+			RequestSelectors:   state.requestSelectors,
+			RequestOpaque:      state.requestOpaque,
 			Intent:             state.intent,
 			DeviceCounts:       intersectedCounts,
 			DeviceCapacity:     intersectedCap,
@@ -1404,10 +1451,24 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 	}
 
 	for driverClass, count := range inst.DeviceCounts {
+		requestClass := driverClass
+		if inst.RequestClasses != nil && inst.RequestClasses[driverClass] != "" {
+			requestClass = inst.RequestClasses[driverClass]
+		}
 		sr := SubResourceConfig{
-			DeviceClass: driverClass,
+			DeviceClass: requestClass,
 			Count:       count,
 			Passthrough: config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
+		}
+		if inst.RequestSelectors != nil {
+			sr.Selectors = append(sr.Selectors, inst.RequestSelectors[driverClass]...)
+		}
+		if inst.RequestOpaque != nil && inst.RequestOpaque[driverClass] != nil {
+			opaque := inst.RequestOpaque[driverClass]
+			sr.Opaque = &OpaqueConfig{
+				Driver:     opaque.Driver,
+				Parameters: append([]byte(nil), opaque.Parameters...),
+			}
 		}
 
 		if cap, ok := inst.DeviceCapacity[driverClass]; ok {
@@ -1455,7 +1516,11 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			for driver := range inst.DeviceCounts {
 				rawDriver := m.driverForClass(driver)
 				if driversWithAttribute[baseDriverName(rawDriver)] {
-					constraintRequests = append(constraintRequests, driver)
+					requestClass := driver
+					if inst.RequestClasses != nil && inst.RequestClasses[driver] != "" {
+						requestClass = inst.RequestClasses[driver]
+					}
+					constraintRequests = append(constraintRequests, requestClass)
 				}
 			}
 		}
