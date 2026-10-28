@@ -933,7 +933,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 			}
 			for driver := range representative.DeviceCounts {
 				if driversWithScalarAttribute[baseDriverName(driver)] {
-					constraintRequests = append(constraintRequests, driver)
+					constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 				}
 			}
 			if len(constraintRequests) == 0 {
@@ -942,7 +942,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 		} else {
 			// No device data available — include all drivers
 			for driver := range representative.DeviceCounts {
-				constraintRequests = append(constraintRequests, driver)
+				constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 			}
 		}
 
@@ -1032,7 +1032,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 			}
 			for driver := range representative.DeviceCounts {
 				if driversWithAttribute[baseDriverName(driver)] {
-					constraintRequests = append(constraintRequests, driver)
+					constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 				}
 			}
 			// Fall back to the fallback attribute if primary doesn't cover enough drivers
@@ -1047,7 +1047,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 				constraintRequests = nil
 				for driver := range representative.DeviceCounts {
 					if driversWithAttribute[baseDriverName(driver)] {
-						constraintRequests = append(constraintRequests, driver)
+						constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 					}
 				}
 			}
@@ -1077,13 +1077,13 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 		// covering all drivers. This ensures devices like memory (which lack
 		// pcieRoot but have numaNode) are co-located with the rest.
 		if rule.FallbackAttribute != "" && constraintAttr != rule.FallbackAttribute {
-			coveredDrivers := make(map[string]bool)
+			coveredClasses := make(map[string]bool)
 			for _, r := range constraintRequests {
-				coveredDrivers[r] = true
+				coveredClasses[r] = true
 			}
 			uncoveredCount := 0
 			for driver := range representative.DeviceCounts {
-				if !coveredDrivers[driver] {
+				if !coveredClasses[m.rules.GetDeviceClassForDriver(driver)] {
 					uncoveredCount++
 				}
 			}
@@ -1097,7 +1097,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 				var fallbackRequests []string
 				for driver := range representative.DeviceCounts {
 					if fallbackDrivers[baseDriverName(driver)] {
-						fallbackRequests = append(fallbackRequests, driver)
+						fallbackRequests = append(fallbackRequests, m.rules.GetDeviceClassForDriver(driver))
 					}
 				}
 				if len(fallbackRequests) > len(constraintRequests) {
@@ -1426,6 +1426,10 @@ func groupingInstanceKey(inst GroupingInstance) string {
 }
 
 func groupingRequestContractKey(inst GroupingInstance) string {
+	mode := inst.Mode
+	if mode == "" {
+		mode = OfferingModeContainer
+	}
 	contract := struct {
 		Mode        OfferingMode             `json:"mode,omitempty"`
 		Passthrough map[string]bool          `json:"passthrough,omitempty"`
@@ -1433,7 +1437,7 @@ func groupingRequestContractKey(inst GroupingInstance) string {
 		Selectors   map[string][]string      `json:"selectors,omitempty"`
 		Opaque      map[string]*OpaqueConfig `json:"opaque,omitempty"`
 	}{
-		Mode:        inst.Mode,
+		Mode:        mode,
 		Passthrough: inst.PassthroughClasses,
 		Classes:     inst.RequestClasses,
 		Selectors:   inst.RequestSelectors,

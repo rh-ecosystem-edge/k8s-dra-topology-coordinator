@@ -192,6 +192,36 @@ func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
 	assert.Contains(t, err.Error(), "conflicting explicit request contract")
 }
 
+func TestDeviceClassManager_OverrideUsesEffectiveClassesInAlignments(t *testing.T) {
+	rules := NewTopologyRuleStore()
+	require.NoError(t, rules.LoadFromConfigMap(makeTopologyRuleConfigMap("gpu-vfio", "default", map[string]string{
+		"attribute":   "gpu.amd.com/numaNode",
+		"type":        "int",
+		"driver":      "gpu.amd.com",
+		"constraint":  "match",
+		"deviceClass": "vfio.gpu.amd.com",
+	})))
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, rules)
+	config, _ := manager.buildPartitionConfig(PartitionPCIeRoot, PartitionDevice{
+		DeviceCounts: map[string]int{
+			"gpu.amd.com":       1,
+			"rdma.mellanox.com": 1,
+		},
+	})
+
+	var found bool
+	for _, alignment := range config.Alignments {
+		for _, request := range alignment.Requests {
+			if request == "vfio.gpu.amd.com" {
+				found = true
+			}
+			assert.NotEqual(t, "gpu.amd.com", request)
+		}
+	}
+	assert.True(t, found, "alignment should reference the effective overridden DeviceClass")
+	require.NoError(t, config.Validate())
+}
+
 func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
