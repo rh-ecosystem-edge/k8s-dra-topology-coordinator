@@ -22,6 +22,19 @@ type OpaqueConfig struct {
 	Parameters json.RawMessage `json:"parameters"`
 }
 
+// validate checks the fields a driver contract needs: a driver name and
+// parameters that form a JSON object.
+func (o *OpaqueConfig) validate() error {
+	if o.Driver == "" {
+		return fmt.Errorf("opaque config missing driver")
+	}
+	var params map[string]json.RawMessage
+	if len(o.Parameters) == 0 || json.Unmarshal(o.Parameters, &params) != nil || params == nil {
+		return fmt.Errorf("opaque config parameters must be a JSON object")
+	}
+	return nil
+}
+
 // DeviceGroupingLabel identifies ConfigMaps containing device grouping definitions.
 const DeviceGroupingLabel = "nodepartition.dra.k8s.io/device-grouping"
 
@@ -306,15 +319,18 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
 		}
 		if d.Opaque != nil {
-			if d.Opaque.Driver == "" {
-				return g, fmt.Errorf("device[%d] opaque config missing driver", i)
-			}
-			if len(d.Opaque.Parameters) == 0 {
-				return g, fmt.Errorf("device[%d] opaque config missing parameters", i)
+			if err := d.Opaque.validate(); err != nil {
+				return g, fmt.Errorf("device[%d] %w", i, err)
 			}
 			if g.Mode != OfferingModePassthrough || !d.Passthrough {
 				return g, fmt.Errorf("device[%d] opaque config requires passthrough mode and passthrough=true", i)
 			}
+		}
+		// Without a mode-specific requestClass, selectors or opaque config nothing tells
+		// the driver to bind the device for passthrough; the coordinator no
+		// longer guesses, so such an offering would allocate in container mode.
+		if g.Mode == OfferingModePassthrough && d.Passthrough && d.RequestClass == "" && len(d.Selectors) == 0 && d.Opaque == nil {
+			return g, fmt.Errorf("device[%d] passthrough requires requestClass, selectors, or opaque config", i)
 		}
 	}
 	if g.Rail {

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
@@ -160,10 +161,18 @@ func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *te
 }
 
 func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
-	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
 	results := []GroupingResult{{
 		NodeName: "node-1",
 		Instances: []GroupingInstance{
+			{
+				GroupingName:  "healthy",
+				Alignment:     "pcieRoot",
+				InstanceIndex: 0,
+				PCIeRoots:     []string{"pci-9"},
+				DeviceCounts:  map[string]int{"gpu.nvidia.com": 1},
+			},
 			{
 				GroupingName:       "gpu-vfio",
 				Alignment:          "pcieRoot",
@@ -190,6 +199,12 @@ func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
 	err := manager.SyncGroupingDeviceClasses(context.Background(), results)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conflicting explicit request contract")
+
+	// The conflicting grouping is skipped; the healthy one still publishes.
+	_, getErr := client.ResourceV1().DeviceClasses().Get(context.Background(), "healthy", metav1.GetOptions{})
+	assert.NoError(t, getErr)
+	_, getErr = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-vfio", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
 }
 
 func TestDeviceClassManager_OverrideUsesEffectiveClassesInAlignments(t *testing.T) {

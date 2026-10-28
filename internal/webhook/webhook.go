@@ -285,7 +285,9 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			configsToAdd = append(configsToAdd, cfg)
 		}
 		if len(configsToAdd) > 0 {
-			allConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), remappedConfigs...), configsToAdd...)
+			// Generated configs go first: later entries win in DRA, and a
+			// user's own config for the same request must take precedence.
+			allConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), configsToAdd...), remappedConfigs...)
 			if len(claim.Spec.Devices.Config) == 0 {
 				patches = append(patches, jsonPatch{
 					Op:    "add",

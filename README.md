@@ -194,6 +194,8 @@ data:
 
 The aggregate DeviceClass keeps the grouping name. Explicit rail instances are named `<grouping>-rail<N>` and carry the `railIndex` label. Ordinary grouping instances retain their locality meaning in the name, such as `<grouping>-numa<N>`, `<grouping>-pcie-<root>`, or `<grouping>-socket<N>`, and do not carry `railIndex`. Fixed PCIe partition classes use their PCIe-root name directly and also do not use `railIndex`. This is a breaking rename for previously generated non-rail and fixed-partition `-rail<N>` classes. During an upgrade, the coordinator pauses publication while those legacy classes exist; remove the legacy classes (or uninstall/reinstall the release), update claims to the new topology-specific names, then resume reconciliation.
 
+Passthrough devices must declare their VFIO contract explicitly: set `requestClass`, `selectors`, or `opaque` on every device with `passthrough: true`, otherwise the ConfigMap is rejected. The coordinator no longer injects VFIO configuration from driver names, so existing passthrough ConfigMaps must be updated before VMs using them restart. `requestClass` must be served by the same driver as `class`, because NUMA selectors use the source driver's attribute namespace.
+
 Grouping offerings default to `mode: container`, which keeps ordinary Pod claims free of VM passthrough configuration. Set `mode: passthrough` and mark only the physical devices that should be exposed to a VM:
 
 ```yaml

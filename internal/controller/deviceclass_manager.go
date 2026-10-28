@@ -110,11 +110,8 @@ func (c *PartitionConfig) Validate() error {
 		if sr.Opaque == nil {
 			continue
 		}
-		if sr.Opaque.Driver == "" {
-			return fmt.Errorf("subResources[%d] opaque config missing driver", i)
-		}
-		if len(sr.Opaque.Parameters) == 0 {
-			return fmt.Errorf("subResources[%d] opaque config missing parameters", i)
+		if err := sr.Opaque.validate(); err != nil {
+			return fmt.Errorf("subResources[%d] %w", i, err)
 		}
 		if c.Mode != OfferingModePassthrough || !sr.Passthrough {
 			return fmt.Errorf("subResources[%d] opaque config requires passthrough mode and passthrough=true", i)
@@ -837,7 +834,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 	// per-driver CEL selectors for NUMA pinning, and partition mode if applicable.
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			SourceDriver: m.driverForClass(driver),
+			SourceDriver: driver,
 			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
 			Count:        count,
 		}
@@ -995,7 +992,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			SourceDriver: m.driverForClass(driver),
+			SourceDriver: driver,
 			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
 			Count:        count,
 		}
@@ -1235,16 +1232,29 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		count          int
 	}
 
+	// A grouping whose instances disagree on the request contract (e.g. two
+	// ConfigMaps sharing a name) is skipped; it must not block other groupings.
+	var publishErrs []error
+	conflicted := make(map[string]struct{})
+	contracts := make(map[string]string)
 	seen := make(map[string]*groupingEntry)
 	for _, result := range results {
 		for _, inst := range result.Instances {
 			config := m.buildGroupingConfig(inst)
 			key := groupingInstanceKey(inst)
 
-			if entry, ok := seen[key]; ok {
-				if groupingRequestContractKey(entry.representative) != groupingRequestContractKey(inst) {
-					return fmt.Errorf("grouping %q has conflicting explicit request contract", inst.GroupingName)
+			contract := groupingRequestContractKey(inst)
+			if prev, ok := contracts[inst.GroupingName]; !ok {
+				contracts[inst.GroupingName] = contract
+			} else if prev != contract {
+				if _, dup := conflicted[inst.GroupingName]; !dup {
+					conflicted[inst.GroupingName] = struct{}{}
+					publishErrs = append(publishErrs, fmt.Errorf("grouping %q has conflicting explicit request contract", inst.GroupingName))
 				}
+				continue
+			}
+
+			if entry, ok := seen[key]; ok {
 				entry.count++
 			} else {
 				seen[key] = &groupingEntry{
@@ -1253,6 +1263,12 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 					count:          1,
 				}
 			}
+		}
+	}
+
+	for key, entry := range seen {
+		if _, bad := conflicted[entry.representative.GroupingName]; bad {
+			delete(seen, key)
 		}
 	}
 
@@ -1287,7 +1303,6 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// Emit per-instance DeviceClasses. Errors are
 	// accumulated rather than returned immediately so that one unpublishable
 	// grouping does not block every other grouping from reconciling.
-	var publishErrs []error
 	for key, entry := range seen {
 		dc := m.buildGroupingDeviceClass(key, entry.representative, entry.config, entry.count)
 		dc.Name = groupingDeviceClassName(entry.representative)
@@ -1347,7 +1362,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			}
 			aggStates[name] = state
 		} else if state.contractKey != groupingRequestContractKey(entry.representative) {
-			return fmt.Errorf("grouping %q has conflicting explicit request contract", name)
+			// Unreachable while the first pass drops conflicting groupings.
+			publishErrs = append(publishErrs, fmt.Errorf("grouping %q has conflicting explicit request contract", name))
+			continue
 		}
 		state.count += entry.count
 		if entry.representative.InstanceIndex < state.minInstanceIndex {

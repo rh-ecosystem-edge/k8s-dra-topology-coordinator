@@ -129,13 +129,34 @@ func TestParseDeviceGrouping_IntentMetadata(t *testing.T) {
 func TestParseDeviceGrouping_PassthroughOffering(t *testing.T) {
 	data := validGroupingData("gpu-vfio")
 	data["mode"] = "passthrough"
-	data["devices"] = "- class: gpu.example.com\n  count: 2\n  passthrough: true"
+	data["devices"] = "- class: gpu.example.com\n  requestClass: gpu-vfio.example.com\n  count: 2\n  passthrough: true"
 
 	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
 	require.NoError(t, err)
 	assert.Equal(t, OfferingModePassthrough, grouping.Mode)
 	require.Len(t, grouping.Devices, 1)
 	assert.True(t, grouping.Devices[0].Passthrough)
+}
+
+func TestParseDeviceGrouping_PassthroughWithoutContractRejected(t *testing.T) {
+	data := validGroupingData("gpu-vfio")
+	data["mode"] = "passthrough"
+	data["devices"] = "- class: gpu.example.com\n  count: 2\n  passthrough: true"
+
+	_, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+	require.ErrorContains(t, err, "passthrough requires requestClass, selectors, or opaque config")
+}
+
+func TestParseDeviceGrouping_OpaqueParametersMustBeObject(t *testing.T) {
+	for name, params := range map[string]string{"null": "null", "string": `"x"`, "array": "[1]"} {
+		t.Run(name, func(t *testing.T) {
+			data := validGroupingData("gpu-vfio")
+			data["mode"] = "passthrough"
+			data["devices"] = "- class: gpu.example.com\n  count: 1\n  passthrough: true\n  opaque:\n    driver: d\n    parameters: " + params
+			_, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+			require.ErrorContains(t, err, "parameters must be a JSON object")
+		})
+	}
 }
 
 func TestParseDeviceGrouping_ExplicitRequestContract(t *testing.T) {
