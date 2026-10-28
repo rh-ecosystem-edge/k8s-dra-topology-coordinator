@@ -197,6 +197,15 @@ func TestParseDeviceGrouping_RejectsDuplicateTopologyClass(t *testing.T) {
 	assert.Contains(t, err.Error(), "duplicate class")
 }
 
+func TestParseDeviceGrouping_RejectsDuplicateRequestClass(t *testing.T) {
+	data := validGroupingData("duplicate-request-class")
+	data["devices"] = "- class: gpu.amd.com\n  requestClass: vfio.shared\n  count: 1\n- class: sriov.example.com\n  requestClass: vfio.shared\n  count: 1"
+
+	_, err := parseDeviceGrouping(makeGroupingConfigMap("duplicate-request-class", data))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate requestClass")
+}
+
 func TestParseDeviceGrouping_RailOffering(t *testing.T) {
 	data := validGroupingData("gpu-nic-pair")
 	data["rail"] = "true"

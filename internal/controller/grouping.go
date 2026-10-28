@@ -285,6 +285,7 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 
 	seenClasses := make(map[string]struct{}, len(devices))
+	seenRequestClasses := make(map[string]struct{}, len(devices))
 	for i, d := range devices {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
@@ -293,6 +294,14 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 			return g, fmt.Errorf("device[%d] has duplicate class %q", i, d.Class)
 		}
 		seenClasses[d.Class] = struct{}{}
+		requestClass := d.RequestClass
+		if requestClass == "" {
+			requestClass = d.Class
+		}
+		if _, exists := seenRequestClasses[requestClass]; exists {
+			return g, fmt.Errorf("device[%d] has duplicate requestClass %q", i, requestClass)
+		}
+		seenRequestClasses[requestClass] = struct{}{}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
 		}

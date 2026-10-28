@@ -359,6 +359,81 @@ func TestPassthroughOfferingCopiesExplicitOpaqueConfigToExpandedRequests(t *test
 		string(configs[0].Opaque.Parameters.Raw))
 }
 
+func TestManagedEmptyPartitionConfigIsRejected(t *testing.T) {
+	dc := makePartitionDeviceClassJSON("empty-partition", []byte(`{"kind":"PartitionConfig","mode":"container","subResources":[]}`))
+	dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+		Name:    "partition",
+		Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+	}}}}}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
+	assert.Contains(t, resp.Response.Result.Message, "subResources")
+}
+
+func TestManagedPartitionConfigRejectsDuplicateRequestClasses(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "vfio.gpu.nvidia.com", Count: 1, Passthrough: true},
+			{DeviceClass: "vfio.gpu.nvidia.com", Count: 1, Passthrough: true},
+		},
+	}
+	dc := makePartitionDeviceClass("duplicate-request-class", partConfig)
+	dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+		Name:    "partition",
+		Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+	}}}}}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
+	assert.Contains(t, resp.Response.Result.Message, "duplicate deviceClass")
+}
+
+func TestEquivalentExistingOpaqueConfigIsNotDuplicated(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModePassthrough,
+		SubResources: []controller.SubResourceConfig{{
+			DeviceClass: "gpu.amd.com",
+			Count:       1,
+			Passthrough: true,
+			Opaque: &controller.OpaqueConfig{
+				Driver:     "gpu.resource.amd.com",
+				Parameters: json.RawMessage(`{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`),
+			},
+		}},
+	}
+	dc := makePartitionDeviceClass("existing-config", partConfig)
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpander(client)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+		Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+		}},
+		Config: []resourcev1.DeviceClaimConfiguration{{
+			DeviceConfiguration: resourcev1.DeviceConfiguration{Opaque: &resourcev1.OpaqueDeviceConfiguration{
+				Driver:     "gpu.resource.amd.com",
+				Parameters: runtime.RawExtension{Raw: []byte(`{"kind":"VfioDeviceConfig","apiVersion":"gpu.resource.amd.com/v1alpha1"}`)},
+			}},
+		}},
+	}}}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	for _, patch := range patches {
+		assert.NotEqual(t, "/spec/devices/config", patch.Path)
+	}
+}
+
 func TestPassthroughConfigsHaveStableOrder(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
@@ -958,6 +1033,46 @@ func TestPreferredConstraintEmittedWhenSatisfiable(t *testing.T) {
 
 	// NUMA constraint should be emitted because it's satisfiable
 	assert.Len(t, constraints, 1, "preferred satisfiable constraint should be emitted")
+	assert.Equal(t, resourcev1.FullyQualifiedName(controller.AttrNUMANode), *constraints[0].MatchAttribute)
+}
+
+func TestPreferredConstraintUsesSourceDriversForExplicitRequestClasses(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{
+			{SourceDriver: "gpu.nvidia.com", DeviceClass: "vfio.gpu.nvidia.com", Count: 1},
+			{SourceDriver: "rdma.mellanox.com", DeviceClass: "vfio.rdma.mellanox.com", Count: 1},
+		},
+		Alignments: []controller.AlignmentConfig{{
+			Attribute:   controller.AttrNUMANode,
+			Requests:    []string{"vfio.gpu.nvidia.com", "vfio.rdma.mellanox.com"},
+			Enforcement: controller.EnforcementPreferred,
+		}},
+	}
+	partClass := makePartitionDeviceClass("explicit-request-classes", partConfig)
+	model := controller.NewTopologyModel()
+	model.UpdateFromResourceSlice(makeTopologyResourceSlice("gpu-slice", "gpu.nvidia.com", "gpu-pool", 0, "pcie-0", 1))
+	model.UpdateFromResourceSlice(makeTopologyResourceSlice("nic-slice", "rdma.mellanox.com", "nic-pool", 0, "pcie-0", 1))
+	expander := NewClaimExpander(fake.NewSimpleClientset(partClass), model)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+		Name:    "partition",
+		Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: partClass.Name, Count: 1},
+	}}}}}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	var constraintsPatch *jsonPatch
+	for i := range patches {
+		if patches[i].Path == "/spec/devices/constraints" {
+			constraintsPatch = &patches[i]
+		}
+	}
+	require.NotNil(t, constraintsPatch)
+	var constraints []resourcev1.DeviceConstraint
+	constraintBytes, err := json.Marshal(constraintsPatch.Value)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(constraintBytes, &constraints))
+	require.Len(t, constraints, 1)
 	assert.Equal(t, resourcev1.FullyQualifiedName(controller.AttrNUMANode), *constraints[0].MatchAttribute)
 }
 

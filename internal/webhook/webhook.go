@@ -268,20 +268,15 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	// Copy only explicitly declared driver configurations. The coordinator
 	// does not infer VFIO behavior from a class or driver name.
 	if len(explicitConfigs) > 0 {
-		existingConfigs := make(map[string]bool, len(claim.Spec.Devices.Config))
-		for _, cfg := range claim.Spec.Devices.Config {
-			existingConfigs[deviceConfigKey(cfg)] = true
-		}
 		sort.SliceStable(explicitConfigs, func(i, j int) bool {
 			return deviceConfigKey(explicitConfigs[i]) < deviceConfigKey(explicitConfigs[j])
 		})
 		configsToAdd := make([]resourcev1.DeviceClaimConfiguration, 0, len(explicitConfigs))
 		for _, cfg := range explicitConfigs {
-			key := deviceConfigKey(cfg)
-			if existingConfigs[key] {
+			existingConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), claim.Spec.Devices.Config...), configsToAdd...)
+			if deviceConfigCovered(existingConfigs, cfg) {
 				continue
 			}
-			existingConfigs[key] = true
 			configsToAdd = append(configsToAdd, cfg)
 		}
 		if len(configsToAdd) > 0 {
@@ -1142,7 +1137,68 @@ func escapeJSONPointer(s string) string {
 }
 
 func deviceConfigKey(config resourcev1.DeviceClaimConfiguration) string {
-	data, _ := json.Marshal(config)
+	if config.Opaque == nil {
+		return ""
+	}
+	requests := append([]string(nil), config.Requests...)
+	sort.Strings(requests)
+	return strings.Join([]string{
+		config.Opaque.Driver,
+		canonicalJSON(config.Opaque.Parameters.Raw),
+		strings.Join(requests, ","),
+	}, "|")
+}
+
+func deviceConfigCovered(existing []resourcev1.DeviceClaimConfiguration, candidate resourcev1.DeviceClaimConfiguration) bool {
+	if candidate.Opaque == nil {
+		return false
+	}
+	candidateRequests := requestSet(candidate.Requests)
+	for _, current := range existing {
+		if current.Opaque == nil || current.Opaque.Driver != candidate.Opaque.Driver {
+			continue
+		}
+		if canonicalJSON(current.Opaque.Parameters.Raw) != canonicalJSON(candidate.Opaque.Parameters.Raw) {
+			continue
+		}
+		if len(current.Requests) == 0 {
+			return true
+		}
+		if len(candidateRequests) == 0 {
+			continue
+		}
+		currentRequests := requestSet(current.Requests)
+		covered := true
+		for request := range candidateRequests {
+			if !currentRequests[request] {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			return true
+		}
+	}
+	return false
+}
+
+func requestSet(requests []string) map[string]bool {
+	set := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		set[request] = true
+	}
+	return set
+}
+
+func canonicalJSON(raw []byte) string {
+	var value interface{}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return string(raw)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return string(raw)
+	}
 	return string(data)
 }
 

@@ -159,6 +159,39 @@ func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *te
 	assert.JSONEq(t, `{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`, string(subResource.Opaque.Parameters))
 }
 
+func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	results := []GroupingResult{{
+		NodeName: "node-1",
+		Instances: []GroupingInstance{
+			{
+				GroupingName:       "gpu-vfio",
+				Alignment:          "pcieRoot",
+				InstanceIndex:      0,
+				Mode:               OfferingModePassthrough,
+				PCIeRoots:          []string{"pci-0"},
+				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
+				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+				RequestClasses:     map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
+			},
+			{
+				GroupingName:       "gpu-vfio",
+				Alignment:          "pcieRoot",
+				InstanceIndex:      1,
+				Mode:               OfferingModePassthrough,
+				PCIeRoots:          []string{"pci-1"},
+				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
+				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+				RequestClasses:     map[string]string{"gpu.nvidia.com": "gpu.nvidia.com"},
+			},
+		},
+	}}
+
+	err := manager.SyncGroupingDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicting explicit request contract")
+}
+
 func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())

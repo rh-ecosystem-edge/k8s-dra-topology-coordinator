@@ -92,10 +92,18 @@ func (c *PartitionConfig) Validate() error {
 	if c.Mode != "" && c.Mode != OfferingModeContainer && c.Mode != OfferingModePassthrough {
 		return fmt.Errorf("invalid mode %q", c.Mode)
 	}
+	if len(c.SubResources) == 0 {
+		return fmt.Errorf("subResources must not be empty")
+	}
+	seenClasses := make(map[string]struct{}, len(c.SubResources))
 	for i, sr := range c.SubResources {
 		if sr.DeviceClass == "" {
 			return fmt.Errorf("subResources[%d] missing deviceClass", i)
 		}
+		if _, exists := seenClasses[sr.DeviceClass]; exists {
+			return fmt.Errorf("subResources[%d] has duplicate deviceClass %q", i, sr.DeviceClass)
+		}
+		seenClasses[sr.DeviceClass] = struct{}{}
 		if sr.Count < 1 {
 			return fmt.Errorf("subResources[%d] count must be positive", i)
 		}
@@ -1224,6 +1232,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			key := groupingInstanceKey(inst)
 
 			if entry, ok := seen[key]; ok {
+				if groupingRequestContractKey(entry.representative) != groupingRequestContractKey(inst) {
+					return fmt.Errorf("grouping %q has conflicting explicit request contract", inst.GroupingName)
+				}
 				entry.count++
 			} else {
 				seen[key] = &groupingEntry{
@@ -1297,6 +1308,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		requestClasses   map[string]string
 		requestSelectors map[string][]string
 		requestOpaque    map[string]*OpaqueConfig
+		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		acc              *deviceIntersectionState
 		minInstanceIndex int
@@ -1315,6 +1327,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				requestClasses:   cloneRequestClasses(entry.representative.RequestClasses),
 				requestSelectors: cloneRequestSelectors(entry.representative.RequestSelectors),
 				requestOpaque:    cloneRequestOpaque(entry.representative.RequestOpaque),
+				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				acc:              newDeviceIntersectionState(),
 				minInstanceIndex: entry.representative.InstanceIndex,
@@ -1323,6 +1336,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				state.passthrough[class] = enabled
 			}
 			aggStates[name] = state
+		} else if state.contractKey != groupingRequestContractKey(entry.representative) {
+			return fmt.Errorf("grouping %q has conflicting explicit request contract", name)
 		}
 		state.count += entry.count
 		if entry.representative.InstanceIndex < state.minInstanceIndex {
@@ -1398,6 +1413,20 @@ func groupingInstanceKey(inst GroupingInstance) string {
 		key += "-numa" + nk
 	}
 	return key
+}
+
+func groupingRequestContractKey(inst GroupingInstance) string {
+	contract := struct {
+		Classes   map[string]string        `json:"classes,omitempty"`
+		Selectors map[string][]string      `json:"selectors,omitempty"`
+		Opaque    map[string]*OpaqueConfig `json:"opaque,omitempty"`
+	}{
+		Classes:   inst.RequestClasses,
+		Selectors: inst.RequestSelectors,
+		Opaque:    inst.RequestOpaque,
+	}
+	data, _ := json.Marshal(contract)
+	return string(data)
 }
 
 func groupingDeviceClassName(inst GroupingInstance) string {
