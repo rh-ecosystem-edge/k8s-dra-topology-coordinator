@@ -30,6 +30,10 @@ import (
 
 const (
 	driverName = "nodepartition.dra.k8s.io"
+
+	// maxAdmissionReviewBytes bounds the request body. UPDATE reviews carry
+	// both object and oldObject, so leave room well above a single object.
+	maxAdmissionReviewBytes = 8 << 20
 )
 
 // ClaimExpander is a mutating admission webhook that expands partition
@@ -87,9 +91,19 @@ func (ce *ClaimExpander) Handler() http.Handler {
 
 // ServeHTTP handles admission review requests.
 func (ce *ClaimExpander) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAdmissionReviewBytes))
 	if err != nil {
 		klog.Errorf("Failed to read request body: %v", err)
+		if errors.As(err, new(*http.MaxBytesError)) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
@@ -154,6 +168,7 @@ func (ce *ClaimExpander) handleAdmission(ctx context.Context, req *admissionv1.A
 	var claim resourcev1.ResourceClaim
 	if err := json.Unmarshal(req.Object.Raw, &claim); err != nil {
 		klog.Errorf("Failed to unmarshal ResourceClaim: %v", err)
+		// The API server validates malformed objects itself.
 		return allowResponse()
 	}
 
@@ -171,23 +186,12 @@ func (ce *ClaimExpander) handleAdmission(ctx context.Context, req *admissionv1.A
 		return allowResponse()
 	}
 
-	patchBytes, err := json.Marshal(patches)
-	if err != nil {
-		klog.Errorf("Failed to marshal patches: %v", err)
-		return allowResponse()
-	}
-
-	patchType := admissionv1.PatchTypeJSONPatch
-	return &admissionv1.AdmissionResponse{
-		Allowed:   true,
-		PatchType: &patchType,
-		Patch:     patchBytes,
-	}
+	return patchResponse(patches)
 }
 
 // expandClaim examines a ResourceClaim and generates JSON patches to expand
 // partition requests into sub-resource requests with alignment constraints.
-func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.ResourceClaim) ([]jsonPatch, error) { //nolint:unparam // error return reserved for future use
+func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.ResourceClaim) ([]jsonPatch, error) {
 	requests := claim.Spec.Devices.Requests
 	if len(requests) == 0 {
 		return nil, nil
@@ -222,11 +226,17 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			continue
 		}
 		// Expand this request into sub-resource requests
-		subRequests, subConstraints, subConfigs := ce.expandRequest(req, partitionConfig)
+		subRequests, subConstraints, subConfigs, err := ce.expandRequest(req, partitionConfig)
+		if err != nil {
+			return nil, err
+		}
 		expandedRequests = append(expandedRequests, subRequests...)
 		constraints = append(constraints, subConstraints...)
 		explicitConfigs = append(explicitConfigs, subConfigs...)
 		anyExpanded = true
+		if len(expandedRequests) > resourcev1.DeviceRequestsMaxSize {
+			return nil, &managedExpansionError{err: fmt.Errorf("claim expands to more than %d requests", resourcev1.DeviceRequestsMaxSize)}
+		}
 
 		// Track the expansion mapping for Pod rewriting
 		var expandedNames []string
@@ -348,10 +358,31 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 // expandRequest expands a partition DeviceRequest into sub-resource requests.
 // When req.Exactly.Count > 1, creates N independent partition instances, each
 // with its own set of sub-requests and alignment constraints.
-func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint, []resourcev1.DeviceClaimConfiguration) {
+//
+// The expansion is rejected when it would exceed the API limit on requests per
+// claim, so an oversized count cannot make the webhook loop or allocate unbounded.
+func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint, []resourcev1.DeviceClaimConfiguration, error) {
 	count := int64(1)
 	if req.Exactly != nil && req.Exactly.Count > 1 {
 		count = req.Exactly.Count
+	}
+
+	// Check count and per-partition size before multiplying to avoid overflow.
+	const maxRequests = int64(resourcev1.DeviceRequestsMaxSize)
+	tooLarge := &managedExpansionError{err: fmt.Errorf("partition request %q expands to more than %d requests", req.Name, maxRequests)}
+	if count > maxRequests {
+		return nil, nil, nil, tooLarge
+	}
+	var perPartition int64
+	for _, sr := range config.SubResources {
+		n := splitCount(config.Mode, sr)
+		if n > maxRequests-perPartition {
+			return nil, nil, nil, tooLarge
+		}
+		perPartition += n
+	}
+	if count*perPartition > maxRequests {
+		return nil, nil, nil, tooLarge
 	}
 
 	var allSubRequests []resourcev1.DeviceRequest
@@ -369,7 +400,16 @@ func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *con
 		allConfigs = append(allConfigs, configs...)
 	}
 
-	return allSubRequests, allConstraints, allConfigs
+	return allSubRequests, allConstraints, allConfigs, nil
+}
+
+// splitCount returns how many count=1 requests a sub-resource is split into.
+// Only plain passthrough devices (no consumable capacity) are split.
+func splitCount(mode controller.OfferingMode, sr controller.SubResourceConfig) int64 {
+	if mode == controller.OfferingModePassthrough && sr.Passthrough && len(sr.Capacity) == 0 && sr.Count > 1 {
+		return int64(sr.Count)
+	}
+	return 1
 }
 
 // expandSinglePartition expands one partition instance into sub-resource requests
@@ -392,16 +432,15 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 		sanitized := sanitizeDeviceClassName(sr.DeviceClass)
 		var requestNames []string
 
-		splitCount := 1
+		splits := int(splitCount(config.Mode, sr))
 		deviceCount := sr.Count
-		if config.Mode == controller.OfferingModePassthrough && sr.Passthrough && len(sr.Capacity) == 0 && sr.Count > 1 {
-			splitCount = sr.Count
+		if splits > 1 {
 			deviceCount = 1
 		}
 
-		for si := 0; si < splitCount; si++ {
+		for si := 0; si < splits; si++ {
 			var name string
-			if splitCount > 1 {
+			if splits > 1 {
 				name = fmt.Sprintf("%s-%s-%d", prefix, sanitized, si)
 			} else {
 				name = prefix + "-" + sanitized
@@ -759,6 +798,7 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 	var pod corev1.Pod
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		klog.Errorf("Failed to unmarshal Pod: %v", err)
+		// The API server validates malformed objects itself.
 		return allowResponse()
 	}
 
@@ -864,18 +904,7 @@ func (ce *ClaimExpander) handlePodAdmission(ctx context.Context, req *admissionv
 	}
 	klog.Infof("Rewriting %d container claim references in pod %s/%s", len(patches), req.Namespace, podID)
 
-	patchBytes, err := json.Marshal(patches)
-	if err != nil {
-		klog.Errorf("Failed to marshal pod patches: %v", err)
-		return allowResponse()
-	}
-
-	patchType := admissionv1.PatchTypeJSONPatch
-	return &admissionv1.AdmissionResponse{
-		Allowed:   true,
-		PatchType: &patchType,
-		Patch:     patchBytes,
-	}
+	return patchResponse(patches)
 }
 
 func (ce *ClaimExpander) expansionMapping(ctx context.Context, requests []resourcev1.DeviceRequest) (map[string][]string, error) {
@@ -891,7 +920,10 @@ func (ce *ClaimExpander) expansionMapping(ctx context.Context, requests []resour
 		if config == nil {
 			continue
 		}
-		subRequests, _, _ := ce.expandRequest(req, config)
+		subRequests, _, _, err := ce.expandRequest(req, config)
+		if err != nil {
+			return nil, err
+		}
 		for _, subRequest := range subRequests {
 			mapping[req.Name] = append(mapping[req.Name], subRequest.Name)
 		}
@@ -906,6 +938,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	var vmi map[string]interface{}
 	if err := json.Unmarshal(req.Object.Raw, &vmi); err != nil {
 		klog.Errorf("Failed to unmarshal VMI: %v", err)
+		// The API server validates malformed objects itself.
 		return allowResponse()
 	}
 
@@ -1177,18 +1210,7 @@ func (ce *ClaimExpander) handleVMIAdmission(ctx context.Context, req *admissionv
 	vmiName, _ := vmi["metadata"].(map[string]interface{})["name"].(string)
 	klog.Infof("Patching %d fields in VMI %s/%s", len(patches), req.Namespace, vmiName)
 
-	patchBytes, err := json.Marshal(patches)
-	if err != nil {
-		klog.Errorf("Failed to marshal VMI patches: %v", err)
-		return allowResponse()
-	}
-
-	patchType := admissionv1.PatchTypeJSONPatch
-	return &admissionv1.AdmissionResponse{
-		Allowed:   true,
-		PatchType: &patchType,
-		Patch:     patchBytes,
-	}
+	return patchResponse(patches)
 }
 
 func pickExpandedRequest(names []string, kind, deviceName string, used map[string]bool) (string, bool) {
@@ -1319,6 +1341,22 @@ func canonicalJSON(raw []byte) string {
 func allowResponse() *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
+	}
+}
+
+// patchResponse returns an allowed admission response carrying the JSON patches.
+// If the patches cannot be marshaled it allows the request unchanged.
+func patchResponse(patches []jsonPatch) *admissionv1.AdmissionResponse {
+	patchBytes, err := json.Marshal(patches)
+	if err != nil {
+		klog.Errorf("Failed to marshal patches: %v", err)
+		return allowResponse()
+	}
+	patchType := admissionv1.PatchTypeJSONPatch
+	return &admissionv1.AdmissionResponse{
+		Allowed:   true,
+		PatchType: &patchType,
+		Patch:     patchBytes,
 	}
 }
 
