@@ -346,6 +346,7 @@ func TestE2EAdmissionRewritesPodTemplateClaim(t *testing.T) {
 	h, ctx := setupE2E(t, cfg, "partitionMode=auto")
 
 	class := waitForPartitionClass(t, h, ctx)
+	require.NoError(t, h.waitFor(ctx, "webhook service and CA wiring", h.webhookReady))
 	templateName := "template-" + h.cfg.RunID
 	_, err := h.client.ResourceV1().ResourceClaimTemplates(h.cfg.Namespace).Create(ctx, &resourcev1.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: h.cfg.Namespace, Labels: ownedLabels(h.cfg.RunID)},
@@ -550,14 +551,16 @@ func TestE2EKubeVirtAdmission(t *testing.T) {
 			}),
 		},
 		Data: map[string]string{
-			"name":    groupingName,
-			"mode":    "passthrough",
-			"devices": "- class: mock-accel.example.com\n  count: 1\n  passthrough: true\n",
+			"name":      groupingName,
+			"mode":      "passthrough",
+			"alignment": "numaNode",
+			"devices":   "- class: mock-accel.example.com\n  requestClass: mock-accel.example.com\n  count: 1\n  passthrough: true\n",
 		},
 	}, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.NoError(t, h.install(ctx, "partitionMode=groupings"))
 	registerHelmCleanup(t, h)
+	require.NoError(t, h.waitFor(ctx, "webhook service and CA wiring", h.webhookReady))
 
 	class := waitForGroupingClass(t, h, ctx, groupingName)
 	config := partitionConfigFromDeviceClass(t, class)

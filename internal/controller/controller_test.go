@@ -457,6 +457,27 @@ func TestDetectGroupingDeviceClassNameCollisions_DistinguishesInstancesWithinGro
 	assert.Contains(t, collisions, "gpu-nic-pair-pcie-pci-0000-00")
 }
 
+func TestDetectGroupingDeviceClassNameCollisions_CollapsesInstancesWithinNUMA(t *testing.T) {
+	results := []GroupingResult{{Instances: []GroupingInstance{
+		{
+			GroupingName:  "gpu-nic-pair",
+			Alignment:     "numaNode",
+			NUMANodes:     []int64{0},
+			PCIeRoots:     []string{"pci:0000:00"},
+			InstanceIndex: 0,
+		},
+		{
+			GroupingName:  "gpu-nic-pair",
+			Alignment:     "numaNode",
+			NUMANodes:     []int64{0},
+			PCIeRoots:     []string{"pci:0000:80"},
+			InstanceIndex: 1,
+		},
+	}}}
+
+	assert.Empty(t, detectGroupingDeviceClassNameCollisions(results))
+}
+
 func TestController_Reconcile_GeneratedNameCollisionUsesPublishedRails(t *testing.T) {
 	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModeGroupings)
 	ctrl.Model().UpdateFromResourceSlice(makeResourceSlice("gpu-slice", "gpu.nvidia.com", "node-1", "gpu-pool", []resourcev1.Device{
