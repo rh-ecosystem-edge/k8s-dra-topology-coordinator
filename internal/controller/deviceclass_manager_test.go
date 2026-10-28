@@ -133,19 +133,19 @@ func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
 func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *testing.T) {
 	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
 	instance := GroupingInstance{
-		Mode:           OfferingModePassthrough,
-		DeviceCounts:   map[string]int{"gpu.nvidia.com": 1},
-		RequestClasses: map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
-		RequestSelectors: map[string][]string{
-			"gpu.nvidia.com": {`device.attributes["gpu.nvidia.com"].type == "vfio"`},
-		},
-		RequestOpaque: map[string]*OpaqueConfig{
+		Mode:         OfferingModePassthrough,
+		DeviceCounts: map[string]int{"gpu.nvidia.com": 1},
+		Requests: map[string]RequestContract{
 			"gpu.nvidia.com": {
-				Driver:     "gpu.nvidia.com",
-				Parameters: []byte(`{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`),
+				Class:     "vfio.gpu.nvidia.com",
+				Selectors: []string{`device.attributes["gpu.nvidia.com"].type == "vfio"`},
+				Opaque: &OpaqueConfig{
+					Driver:     "gpu.nvidia.com",
+					Parameters: []byte(`{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`),
+				},
+				Passthrough: true,
 			},
 		},
-		PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
 	}
 
 	config := manager.buildGroupingConfig(instance)
@@ -174,24 +174,26 @@ func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
 				DeviceCounts:  map[string]int{"gpu.nvidia.com": 1},
 			},
 			{
-				GroupingName:       "gpu-vfio",
-				Alignment:          "pcieRoot",
-				InstanceIndex:      0,
-				Mode:               OfferingModePassthrough,
-				PCIeRoots:          []string{"pci-0"},
-				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
-				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
-				RequestClasses:     map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
+				GroupingName:  "gpu-vfio",
+				Alignment:     "pcieRoot",
+				InstanceIndex: 0,
+				Mode:          OfferingModePassthrough,
+				PCIeRoots:     []string{"pci-0"},
+				DeviceCounts:  map[string]int{"gpu.nvidia.com": 1},
+				Requests: map[string]RequestContract{
+					"gpu.nvidia.com": {Class: "vfio.gpu.nvidia.com", Passthrough: true},
+				},
 			},
 			{
-				GroupingName:       "gpu-vfio",
-				Alignment:          "pcieRoot",
-				InstanceIndex:      1,
-				Mode:               OfferingModePassthrough,
-				PCIeRoots:          []string{"pci-1"},
-				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
-				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
-				RequestClasses:     map[string]string{"gpu.nvidia.com": "gpu.nvidia.com"},
+				GroupingName:  "gpu-vfio",
+				Alignment:     "pcieRoot",
+				InstanceIndex: 1,
+				Mode:          OfferingModePassthrough,
+				PCIeRoots:     []string{"pci-1"},
+				DeviceCounts:  map[string]int{"gpu.nvidia.com": 1},
+				Requests: map[string]RequestContract{
+					"gpu.nvidia.com": {Class: "gpu.nvidia.com", Passthrough: true},
+				},
 			},
 		},
 	}}
@@ -1409,6 +1411,39 @@ func TestDeviceClassManager_GroupingConfigIsDeterministic(t *testing.T) {
 	}
 }
 
+// passthroughRequests marks each topology class as a passthrough request that
+// uses the topology class itself.
+func passthroughRequests(classes ...string) map[string]RequestContract {
+	requests := make(map[string]RequestContract, len(classes))
+	for _, class := range classes {
+		requests[class] = RequestContract{Passthrough: true}
+	}
+	return requests
+}
+
+// buildGroupingConfig appends a NUMA selector to the generated request; it must
+// not write through the instance's Selectors slice, which may share backing
+// storage with the DeviceGrouping.
+func TestDeviceClassManager_BuildGroupingConfigDoesNotMutateSelectors(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	selectors := make([]string, 1, 4)
+	selectors[0] = `device.attributes["gpu.nvidia.com"].type == "vfio"`
+	spare := selectors[:2:4]
+	instance := GroupingInstance{
+		NUMANodes:    []int64{0},
+		DeviceCounts: map[string]int{"gpu.nvidia.com": 1},
+		Requests:     map[string]RequestContract{"gpu.nvidia.com": {Selectors: selectors}},
+	}
+
+	for i := 0; i < 2; i++ {
+		config := manager.buildGroupingConfig(instance)
+		require.Len(t, config.SubResources, 1)
+		assert.Len(t, config.SubResources[0].Selectors, 2)
+	}
+	assert.Equal(t, []string{`device.attributes["gpu.nvidia.com"].type == "vfio"`}, instance.Requests["gpu.nvidia.com"].Selectors)
+	assert.Empty(t, spare[1], "spare capacity must stay untouched")
+}
+
 func TestDeviceClassManager_GroupingConfigCarriesPassthroughMode(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	rules := NewTopologyRuleStore()
@@ -1416,15 +1451,12 @@ func TestDeviceClassManager_GroupingConfigCarriesPassthroughMode(t *testing.T) {
 
 	inst := multiDeviceGroupingInstance(0)
 	inst.Mode = OfferingModePassthrough
-	inst.PassthroughClasses = map[string]bool{
-		"gpu.nvidia.com":    true,
-		"rdma.mellanox.com": true,
-	}
+	inst.Requests = passthroughRequests("gpu.nvidia.com", "rdma.mellanox.com")
 
 	config := manager.buildGroupingConfig(inst)
 	assert.Equal(t, OfferingModePassthrough, config.Mode)
 	for _, sr := range config.SubResources {
-		assert.Equal(t, inst.PassthroughClasses[sr.DeviceClass], sr.Passthrough, sr.DeviceClass)
+		assert.Equal(t, inst.Requests[sr.DeviceClass].Passthrough, sr.Passthrough, sr.DeviceClass)
 	}
 }
 
@@ -1433,9 +1465,7 @@ func TestDeviceClassManager_ContainerGroupingDoesNotCarryPassthrough(t *testing.
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
 	instance := multiDeviceGroupingInstance(0)
 	instance.Mode = OfferingModeContainer
-	instance.PassthroughClasses = map[string]bool{
-		"gpu.nvidia.com": true,
-	}
+	instance.Requests = passthroughRequests("gpu.nvidia.com")
 
 	config := manager.buildGroupingConfig(instance)
 	assert.Equal(t, OfferingModeContainer, config.Mode)
@@ -1449,10 +1479,7 @@ func TestDeviceClassManager_GroupingAggregateCarriesPassthroughMode(t *testing.T
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
 	instance := multiDeviceGroupingInstance(0)
 	instance.Mode = OfferingModePassthrough
-	instance.PassthroughClasses = map[string]bool{
-		"gpu.nvidia.com":    true,
-		"rdma.mellanox.com": true,
-	}
+	instance.Requests = passthroughRequests("gpu.nvidia.com", "rdma.mellanox.com")
 
 	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
 		NodeName:  "node-1",
@@ -1465,7 +1492,7 @@ func TestDeviceClassManager_GroupingAggregateCarriesPassthroughMode(t *testing.T
 	require.NoError(t, json.Unmarshal(dc.Spec.Config[0].Opaque.Parameters.Raw, &config))
 	assert.Equal(t, OfferingModePassthrough, config.Mode)
 	for _, sr := range config.SubResources {
-		assert.Equal(t, instance.PassthroughClasses[sr.DeviceClass], sr.Passthrough, sr.DeviceClass)
+		assert.Equal(t, instance.Requests[sr.DeviceClass].Passthrough, sr.Passthrough, sr.DeviceClass)
 	}
 }
 
