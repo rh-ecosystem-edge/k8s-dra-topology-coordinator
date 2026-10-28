@@ -3,6 +3,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	klog "k8s.io/klog/v2"
 
@@ -235,8 +237,13 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	if !anyExpanded {
 		return nil, nil
 	}
+	if err := validateExpandedRequestNames(expandedRequests); err != nil {
+		return nil, &managedExpansionError{err: err}
+	}
 
 	var patches []jsonPatch
+	remappedConstraints, constraintsChanged := remapConstraints(claim.Spec.Devices.Constraints, expansionMap)
+	remappedConfigs, configsChanged := remapConfigs(claim.Spec.Devices.Config, expansionMap)
 
 	// Replace requests
 	patches = append(patches, jsonPatch{
@@ -246,41 +253,39 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	})
 
 	// Add or replace constraints
-	if len(constraints) > 0 {
+	allConstraints := append(remappedConstraints, constraints...)
+	if len(allConstraints) > 0 && (constraintsChanged || len(constraints) > 0) {
 		if len(claim.Spec.Devices.Constraints) == 0 {
 			patches = append(patches, jsonPatch{
 				Op:    "add",
 				Path:  "/spec/devices/constraints",
-				Value: constraints,
+				Value: allConstraints,
 			})
 		} else {
-			merged := make([]resourcev1.DeviceConstraint, 0, len(claim.Spec.Devices.Constraints)+len(constraints))
-			merged = append(merged, claim.Spec.Devices.Constraints...)
-			merged = append(merged, constraints...)
 			patches = append(patches, jsonPatch{
 				Op:    "replace",
 				Path:  "/spec/devices/constraints",
-				Value: merged,
+				Value: allConstraints,
 			})
 		}
 	}
 
 	// Copy only explicitly declared driver configurations. The coordinator
 	// does not infer VFIO behavior from a class or driver name.
+	configsToAdd := make([]resourcev1.DeviceClaimConfiguration, 0, len(explicitConfigs))
 	if len(explicitConfigs) > 0 {
 		sort.SliceStable(explicitConfigs, func(i, j int) bool {
 			return deviceConfigKey(explicitConfigs[i]) < deviceConfigKey(explicitConfigs[j])
 		})
-		configsToAdd := make([]resourcev1.DeviceClaimConfiguration, 0, len(explicitConfigs))
 		for _, cfg := range explicitConfigs {
-			existingConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), claim.Spec.Devices.Config...), configsToAdd...)
+			existingConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), remappedConfigs...), configsToAdd...)
 			if deviceConfigCovered(existingConfigs, cfg) {
 				continue
 			}
 			configsToAdd = append(configsToAdd, cfg)
 		}
 		if len(configsToAdd) > 0 {
-			allConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), claim.Spec.Devices.Config...), configsToAdd...)
+			allConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), remappedConfigs...), configsToAdd...)
 			if len(claim.Spec.Devices.Config) == 0 {
 				patches = append(patches, jsonPatch{
 					Op:    "add",
@@ -295,6 +300,13 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 				})
 			}
 		}
+	}
+	if configsChanged && len(configsToAdd) == 0 {
+		patches = append(patches, jsonPatch{
+			Op:    "replace",
+			Path:  "/spec/devices/config",
+			Value: remappedConfigs,
+		})
 	}
 
 	// Annotate the claim with the expansion mapping so the Pod webhook
@@ -556,6 +568,70 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 	}
 
 	return subRequests, constraints, explicitConfigs
+}
+
+func validateExpandedRequestNames(requests []resourcev1.DeviceRequest) error {
+	seen := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		if _, exists := seen[request.Name]; exists {
+			return fmt.Errorf("expanded request name %q is duplicated", request.Name)
+		}
+		if problems := validation.IsDNS1123Label(request.Name); len(problems) > 0 {
+			return fmt.Errorf("expanded request name %q is invalid: %s", request.Name, strings.Join(problems, "; "))
+		}
+		seen[request.Name] = struct{}{}
+	}
+	return nil
+}
+
+func remapConstraints(constraints []resourcev1.DeviceConstraint, mapping map[string][]string) ([]resourcev1.DeviceConstraint, bool) {
+	if len(constraints) == 0 {
+		return nil, false
+	}
+	remapped := make([]resourcev1.DeviceConstraint, 0, len(constraints))
+	changed := false
+	for _, constraint := range constraints {
+		copyConstraint := constraint
+		copyConstraint.Requests = nil
+		for _, request := range constraint.Requests {
+			expanded, ok := mapping[request]
+			if !ok {
+				copyConstraint.Requests = append(copyConstraint.Requests, request)
+				continue
+			}
+			copyConstraint.Requests = append(copyConstraint.Requests, expanded...)
+			changed = true
+		}
+		remapped = append(remapped, copyConstraint)
+	}
+	return remapped, changed
+}
+
+func remapConfigs(configs []resourcev1.DeviceClaimConfiguration, mapping map[string][]string) ([]resourcev1.DeviceClaimConfiguration, bool) {
+	if len(configs) == 0 {
+		return nil, false
+	}
+	remapped := make([]resourcev1.DeviceClaimConfiguration, 0, len(configs))
+	changed := false
+	for _, config := range configs {
+		copyConfig := config
+		copyConfig.Requests = nil
+		if len(config.Requests) == 0 {
+			remapped = append(remapped, copyConfig)
+			continue
+		}
+		for _, request := range config.Requests {
+			expanded, ok := mapping[request]
+			if !ok {
+				copyConfig.Requests = append(copyConfig.Requests, request)
+				continue
+			}
+			copyConfig.Requests = append(copyConfig.Requests, expanded...)
+			changed = true
+		}
+		remapped = append(remapped, copyConfig)
+	}
+	return remapped, changed
 }
 
 // getPartitionConfig looks up a DeviceClass and extracts the PartitionConfig
@@ -1192,7 +1268,9 @@ func requestSet(requests []string) map[string]bool {
 
 func canonicalJSON(raw []byte) string {
 	var value interface{}
-	if err := json.Unmarshal(raw, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return string(raw)
 	}
 	data, err := json.Marshal(value)

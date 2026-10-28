@@ -203,7 +203,7 @@ AdmissionReview response plus the stored object.
 | ADM-07 | Submit an explicit passthrough grouping | Only explicitly declared opaque config is copied to the matching passthrough request; no driver-name heuristic runs |
 | ADM-08 | Use a count greater than one | Expanded request naming and count are correct for container resources; passthrough resources are split into unique requests as designed |
 | ADM-09a | Create a managed DeviceClass with missing/malformed opaque config | Managed catalog claim is denied; ordinary native claim still passes through |
-| ADM-09b | Use an explicit API fault mechanism (proxy or temporary RBAC denial) during DeviceClass lookup | Managed catalog claim is denied; ordinary native claim still passes through; the fault is removed before cleanup |
+| ADM-09b | Use an explicit API fault mechanism (proxy or temporary RBAC denial) during DeviceClass lookup | Admission fails closed because ownership cannot be established; the fault is removed before cleanup |
 
 ADM-06 through ADM-09b are the regression tests for the review findings about
 implicit passthrough and fail-open admission.

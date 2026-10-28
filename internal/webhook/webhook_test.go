@@ -397,6 +397,49 @@ func TestManagedPartitionConfigRejectsDuplicateRequestClasses(t *testing.T) {
 	assert.Contains(t, resp.Response.Result.Message, "duplicate deviceClass")
 }
 
+func TestManagedPartitionConfigRejectsUnknownAlignmentRequest(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind:         "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{{DeviceClass: "gpu.amd.com", Count: 1}},
+		Alignments: []controller.AlignmentConfig{{
+			Attribute: controller.AttrPCIeRoot,
+			Requests:  []string{"gpu.amd.com", "missing.class"},
+		}},
+	}
+	dc := makePartitionDeviceClass("unknown-alignment-request", partConfig)
+	dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+	expander := NewClaimExpander(fake.NewSimpleClientset(dc))
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+		Name:    "partition",
+		Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+	}}}}}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
+	assert.Contains(t, resp.Response.Result.Message, "unknown deviceClass")
+}
+
+func TestExpansionRejectsCollidingGeneratedRequestNames(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{
+			{DeviceClass: "foo.a", Count: 1},
+			{DeviceClass: "foo-a", Count: 1},
+		},
+	}
+	dc := makePartitionDeviceClass("colliding-request-names", partConfig)
+	dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+	expander := NewClaimExpander(fake.NewSimpleClientset(dc))
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+		Name:    "partition",
+		Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+	}}}}}
+
+	resp := sendAdmissionReview(t, expander.Handler(), makeAdmissionReview(claim, admissionv1.Create))
+	assert.False(t, resp.Response.Allowed)
+	assert.Contains(t, resp.Response.Result.Message, "duplicated")
+}
+
 func TestEquivalentExistingOpaqueConfigIsNotDuplicated(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind: "PartitionConfig",
@@ -432,6 +475,56 @@ func TestEquivalentExistingOpaqueConfigIsNotDuplicated(t *testing.T) {
 	for _, patch := range patches {
 		assert.NotEqual(t, "/spec/devices/config", patch.Path)
 	}
+}
+
+func TestExpansionRemapsExistingConstraintAndConfigReferences(t *testing.T) {
+	partConfig := controller.PartitionConfig{
+		Kind:         "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{{DeviceClass: "gpu.amd.com", Count: 1}},
+	}
+	dc := makePartitionDeviceClass("remap-references", partConfig)
+	client := fake.NewSimpleClientset(dc)
+	expander := NewClaimExpander(client)
+	attribute := resourcev1.FullyQualifiedName(controller.AttrPCIeRoot)
+	claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+		Requests: []resourcev1.DeviceRequest{{
+			Name:    "partition",
+			Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: dc.Name, Count: 1},
+		}},
+		Constraints: []resourcev1.DeviceConstraint{{
+			Requests:       []string{"partition"},
+			MatchAttribute: &attribute,
+		}},
+		Config: []resourcev1.DeviceClaimConfiguration{{
+			Requests: []string{"partition"},
+			DeviceConfiguration: resourcev1.DeviceConfiguration{Opaque: &resourcev1.OpaqueDeviceConfiguration{
+				Driver:     "example.com/driver",
+				Parameters: runtime.RawExtension{Raw: []byte(`{"kind":"ExampleConfig"}`)},
+			}},
+		}},
+	}}}
+
+	patches, err := expander.expandClaim(context.Background(), claim)
+	require.NoError(t, err)
+	var constraintsPatch, configsPatch *jsonPatch
+	for i := range patches {
+		switch patches[i].Path {
+		case "/spec/devices/constraints":
+			constraintsPatch = &patches[i]
+		case "/spec/devices/config":
+			configsPatch = &patches[i]
+		}
+	}
+	require.NotNil(t, constraintsPatch)
+	require.NotNil(t, configsPatch)
+	constraintBytes, err := json.Marshal(constraintsPatch.Value)
+	require.NoError(t, err)
+	assert.NotContains(t, string(constraintBytes), `"partition"`)
+	assert.Contains(t, string(constraintBytes), "partition-gpu-amd-com")
+	configBytes, err := json.Marshal(configsPatch.Value)
+	require.NoError(t, err)
+	assert.NotContains(t, string(configBytes), `"partition"`)
+	assert.Contains(t, string(configBytes), "partition-gpu-amd-com")
 }
 
 func TestPassthroughConfigsHaveStableOrder(t *testing.T) {

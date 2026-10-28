@@ -120,6 +120,16 @@ func (c *PartitionConfig) Validate() error {
 			return fmt.Errorf("subResources[%d] opaque config requires passthrough mode and passthrough=true", i)
 		}
 	}
+	for i, alignment := range c.Alignments {
+		if alignment.Attribute == "" {
+			return fmt.Errorf("alignments[%d] missing attribute", i)
+		}
+		for _, request := range alignment.Requests {
+			if _, exists := seenClasses[request]; !exists {
+				return fmt.Errorf("alignments[%d] references unknown deviceClass %q", i, request)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1417,13 +1427,17 @@ func groupingInstanceKey(inst GroupingInstance) string {
 
 func groupingRequestContractKey(inst GroupingInstance) string {
 	contract := struct {
-		Classes   map[string]string        `json:"classes,omitempty"`
-		Selectors map[string][]string      `json:"selectors,omitempty"`
-		Opaque    map[string]*OpaqueConfig `json:"opaque,omitempty"`
+		Mode        OfferingMode             `json:"mode,omitempty"`
+		Passthrough map[string]bool          `json:"passthrough,omitempty"`
+		Classes     map[string]string        `json:"classes,omitempty"`
+		Selectors   map[string][]string      `json:"selectors,omitempty"`
+		Opaque      map[string]*OpaqueConfig `json:"opaque,omitempty"`
 	}{
-		Classes:   inst.RequestClasses,
-		Selectors: inst.RequestSelectors,
-		Opaque:    inst.RequestOpaque,
+		Mode:        inst.Mode,
+		Passthrough: inst.PassthroughClasses,
+		Classes:     inst.RequestClasses,
+		Selectors:   inst.RequestSelectors,
+		Opaque:      inst.RequestOpaque,
 	}
 	data, _ := json.Marshal(contract)
 	return string(data)
