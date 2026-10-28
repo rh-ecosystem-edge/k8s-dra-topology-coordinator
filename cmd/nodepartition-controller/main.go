@@ -92,7 +92,12 @@ func init() {
 		"Path to TLS private key for webhook server")
 }
 
-func runController(_ *cobra.Command, _ []string) error {
+func runController(cmd *cobra.Command, _ []string) error {
+	// An empty namespace trusts every namespace, so it must be asked for with
+	// an explicit --config-namespace=, never fall out of an unset POD_NAMESPACE.
+	if configNamespace == "" && !cmd.Flags().Changed("config-namespace") {
+		return fmt.Errorf("--config-namespace or POD_NAMESPACE is required; pass --config-namespace= to watch all namespaces")
+	}
 	k8sConfig, err := clientcmd.BuildConfigFromFlags("", kubecfg)
 	if err != nil {
 		return fmt.Errorf("failed to load kubeconfig: %v", err)

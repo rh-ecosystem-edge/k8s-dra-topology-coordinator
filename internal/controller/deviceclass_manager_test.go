@@ -2177,3 +2177,18 @@ func TestGroupingRequestContractKey_IncludesRequestDriver(t *testing.T) {
 	b := GroupingInstance{Requests: map[string]RequestContract{"gpu.example.com": {Class: "v", Driver: "two.example.com"}}}
 	assert.NotEqual(t, groupingRequestContractKey(a), groupingRequestContractKey(b))
 }
+
+func TestPartitionConfigValidate_AlignmentAcceptsLegacySourceDriver(t *testing.T) {
+	config := PartitionConfig{
+		Kind: "PartitionConfig",
+		SubResources: []SubResourceConfig{
+			{SourceDriver: "gpu.example.com", DeviceClass: "gpu-class", Count: 1},
+			{SourceDriver: "nic.example.com", DeviceClass: "nic-class", Count: 1},
+		},
+		Alignments: []AlignmentConfig{{Attribute: "pcieRoot", Requests: []string{"gpu.example.com", "nic-class"}}},
+	}
+	require.NoError(t, config.Validate())
+
+	config.Alignments[0].Requests = []string{"unknown"}
+	require.ErrorContains(t, config.Validate(), "unknown deviceClass")
+}
