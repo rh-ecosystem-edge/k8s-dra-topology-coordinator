@@ -451,7 +451,11 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 	// Build driver counts map for satisfiability checks
 	driverCounts := make(map[string]int, len(config.SubResources))
 	for _, sr := range config.SubResources {
-		driverCounts[sr.DeviceClass] = sr.Count
+		driver := sr.SourceDriver
+		if driver == "" {
+			driver = sr.DeviceClass
+		}
+		driverCounts[driver] = sr.Count
 	}
 
 	// Build constraints from alignments.

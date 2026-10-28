@@ -318,7 +318,7 @@ The run passes only when:
 2. no managed claim is admitted without complete expansion;
 3. native claims remain unmodified;
 4. container offerings never receive implicit VFIO configuration;
-5. explicit passthrough offerings inject VFIO only for marked devices;
+5. explicit passthrough offerings copy only their declared driver configuration;
 6. template-backed Pod and VMI references are proven with generated claim
    names;
 7. custom driver-name and two-replica determinism tests pass;

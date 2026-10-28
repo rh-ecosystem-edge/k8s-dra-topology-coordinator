@@ -284,10 +284,15 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		return g, fmt.Errorf("devices list cannot be empty")
 	}
 
+	seenClasses := make(map[string]struct{}, len(devices))
 	for i, d := range devices {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
 		}
+		if _, exists := seenClasses[d.Class]; exists {
+			return g, fmt.Errorf("device[%d] has duplicate class %q", i, d.Class)
+		}
+		seenClasses[d.Class] = struct{}{}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
 		}

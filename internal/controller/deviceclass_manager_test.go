@@ -150,6 +150,7 @@ func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *te
 	config := manager.buildGroupingConfig(instance)
 	require.Len(t, config.SubResources, 1)
 	subResource := config.SubResources[0]
+	assert.Equal(t, "gpu.nvidia.com", subResource.SourceDriver)
 	assert.Equal(t, "vfio.gpu.nvidia.com", subResource.DeviceClass)
 	assert.Equal(t, []string{`device.attributes["gpu.nvidia.com"].type == "vfio"`}, subResource.Selectors)
 	assert.True(t, subResource.Passthrough)

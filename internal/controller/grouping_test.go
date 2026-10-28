@@ -188,6 +188,15 @@ func TestParseDeviceGrouping_RejectsOpaqueConfigOutsidePassthrough(t *testing.T)
 	assert.Contains(t, err.Error(), "requires passthrough")
 }
 
+func TestParseDeviceGrouping_RejectsDuplicateTopologyClass(t *testing.T) {
+	data := validGroupingData("duplicate-class")
+	data["devices"] = "- class: gpu.amd.com\n  count: 1\n- class: gpu.amd.com\n  requestClass: vfio.gpu.amd.com\n  count: 1"
+
+	_, err := parseDeviceGrouping(makeGroupingConfigMap("duplicate-class", data))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate class")
+}
+
 func TestParseDeviceGrouping_RailOffering(t *testing.T) {
 	data := validGroupingData("gpu-nic-pair")
 	data["rail"] = "true"

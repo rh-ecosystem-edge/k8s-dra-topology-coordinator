@@ -53,8 +53,11 @@ type PartitionConfig struct {
 
 // SubResourceConfig defines a sub-resource that a partition contains.
 type SubResourceConfig struct {
-	DeviceClass string `json:"deviceClass"`
-	Count       int    `json:"count"`
+	// SourceDriver identifies the driver used for topology satisfiability checks.
+	// It may differ from DeviceClass when a mode-specific class is requested.
+	SourceDriver string `json:"sourceDriver,omitempty"`
+	DeviceClass  string `json:"deviceClass"`
+	Count        int    `json:"count"`
 	// Passthrough marks this subresource for VM passthrough handling when the
 	// enclosing offering is in passthrough mode.
 	Passthrough bool `json:"passthrough,omitempty"`
@@ -816,8 +819,9 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 	// per-driver CEL selectors for NUMA pinning, and partition mode if applicable.
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			DeviceClass: m.rules.GetDeviceClassForDriver(driver),
-			Count:       count,
+			SourceDriver: m.driverForClass(driver),
+			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
+			Count:        count,
 		}
 		if representative.DeviceCapacity != nil {
 			if cap, ok := representative.DeviceCapacity[driver]; ok {
@@ -973,8 +977,9 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			DeviceClass: m.rules.GetDeviceClassForDriver(driver),
-			Count:       count,
+			SourceDriver: m.driverForClass(driver),
+			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
+			Count:        count,
 		}
 		if representative.DeviceCapacity != nil {
 			if cap, ok := representative.DeviceCapacity[driver]; ok {
@@ -1456,9 +1461,10 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			requestClass = inst.RequestClasses[driverClass]
 		}
 		sr := SubResourceConfig{
-			DeviceClass: requestClass,
-			Count:       count,
-			Passthrough: config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
+			SourceDriver: m.driverForClass(driverClass),
+			DeviceClass:  requestClass,
+			Count:        count,
+			Passthrough:  config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
 		}
 		if inst.RequestSelectors != nil {
 			sr.Selectors = append(sr.Selectors, inst.RequestSelectors[driverClass]...)
