@@ -568,6 +568,60 @@ func TestGroupingBuilder_BasicPCIeRootAlignment(t *testing.T) {
 	}
 }
 
+func TestGroupingBuilder_BuildGroupingsCarriesRequestContract(t *testing.T) {
+	model := NewTopologyModel()
+	rules := NewTopologyRuleStore()
+	nodeTopo := &NodeTopology{
+		NodeName:        "node-1",
+		DevicesByDriver: map[string][]TopologyDevice{},
+	}
+	nodeTopo.DevicesByDriver["gpu.amd.com"] = []TopologyDevice{
+		makeTestDevice("gpu.amd.com", "gpu-0", int64Ptr(0), stringPtr("pcie-0")),
+	}
+	nodeTopo.DevicesByDriver["dpu.pensando.com"] = []TopologyDevice{
+		makeTestDevice("dpu.pensando.com", "dpu-0", int64Ptr(0), stringPtr("pcie-0")),
+	}
+	model.mu.Lock()
+	model.nodes = map[string]*NodeTopology{"node-1": nodeTopo}
+	model.mu.Unlock()
+
+	opaque := &OpaqueConfig{Driver: "gpu.amd.com", Parameters: []byte(`{"kind":"Vfio"}`)}
+	grouping := DeviceGrouping{
+		Name:      "gpu-dpu-vfio",
+		Alignment: "pcieRoot",
+		Mode:      OfferingModePassthrough,
+		Devices: []GroupingDevice{
+			{
+				Class: "gpu.amd.com", Count: 1, Passthrough: true,
+				RequestClass: "vfio.gpu.amd.com",
+				Selectors:    []string{`device.attributes["gpu.amd.com"].isVF == true`},
+				Opaque:       opaque,
+			},
+			{Class: "dpu.pensando.com", Count: 1},
+		},
+	}
+
+	results := NewGroupingBuilder(model, rules).BuildGroupings([]DeviceGrouping{grouping})
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Instances, 1)
+	inst := results[0].Instances[0]
+
+	assert.Equal(t, RequestContract{
+		Class:       "vfio.gpu.amd.com",
+		Selectors:   []string{`device.attributes["gpu.amd.com"].isVF == true`},
+		Opaque:      opaque,
+		Passthrough: true,
+	}, inst.Requests["gpu.amd.com"])
+	// A device without an override requests its own class.
+	assert.Equal(t, RequestContract{Class: "dpu.pensando.com"}, inst.Requests["dpu.pensando.com"])
+	assert.Equal(t, "dpu.pensando.com", inst.requestClass("dpu.pensando.com"))
+
+	// The instance holds copies, not the grouping's own slices.
+	assert.NotSame(t, opaque, inst.Requests["gpu.amd.com"].Opaque)
+	opaque.Parameters[0] = 'X'
+	assert.Equal(t, byte('{'), inst.Requests["gpu.amd.com"].Opaque.Parameters[0])
+}
+
 func TestGroupingBuilder_BuildGroupingsCarriesIntentMetadata(t *testing.T) {
 	model := NewTopologyModel()
 	rules := NewTopologyRuleStore()

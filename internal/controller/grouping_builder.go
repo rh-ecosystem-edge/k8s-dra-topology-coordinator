@@ -39,15 +39,9 @@ type GroupingInstance struct {
 	DeviceCounts map[string]int
 	// DeviceCapacity maps driver name -> capacity for shared devices.
 	DeviceCapacity map[string]map[string]string
-	// PassthroughClasses marks device classes explicitly selected for VM passthrough.
-	PassthroughClasses map[string]bool
-	// RequestClasses maps topology classes to the driver-owned classes used in
-	// expanded claims. A missing entry means the topology class is requested.
-	RequestClasses map[string]string
-	// RequestSelectors and RequestOpaque carry explicit per-request driver
-	// contracts from the grouping ConfigMap.
-	RequestSelectors map[string][]string
-	RequestOpaque    map[string]*OpaqueConfig
+	// Requests maps each topology class to the explicit driver contract the
+	// grouping ConfigMap declares for it.
+	Requests map[string]RequestContract
 	// Devices lists the topology devices in this instance.
 	Devices []TopologyDevice
 
@@ -58,43 +52,35 @@ type GroupingInstance struct {
 	InstanceIndex int
 }
 
-func cloneRequestClasses(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
+// RequestContract is the driver-owned contract for one topology class in a
+// grouping: which DeviceClass expanded claims request, plus the selectors and
+// opaque configuration copied onto the generated request.
+type RequestContract struct {
+	// Class is the requested DeviceClass; empty means the topology class itself.
+	Class     string        `json:"class,omitempty"`
+	Selectors []string      `json:"selectors,omitempty"`
+	Opaque    *OpaqueConfig `json:"opaque,omitempty"`
+	// Passthrough marks the class as explicitly selected for VM passthrough.
+	Passthrough bool `json:"passthrough,omitempty"`
 }
 
-func cloneRequestSelectors(in map[string][]string) map[string][]string {
-	if in == nil {
-		return nil
+// requestClass returns the DeviceClass expanded claims use for a topology class.
+func (inst GroupingInstance) requestClass(class string) string {
+	if c := inst.Requests[class].Class; c != "" {
+		return c
 	}
-	out := make(map[string][]string, len(in))
-	for key, values := range in {
-		out[key] = append([]string(nil), values...)
-	}
-	return out
+	return class
 }
 
-func cloneRequestOpaque(in map[string]*OpaqueConfig) map[string]*OpaqueConfig {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]*OpaqueConfig, len(in))
-	for key, value := range in {
-		if value == nil {
-			continue
-		}
-		out[key] = &OpaqueConfig{
-			Driver:     value.Driver,
-			Parameters: append([]byte(nil), value.Parameters...),
+func (r RequestContract) clone() RequestContract {
+	r.Selectors = append([]string(nil), r.Selectors...)
+	if r.Opaque != nil {
+		r.Opaque = &OpaqueConfig{
+			Driver:     r.Opaque.Driver,
+			Parameters: append([]byte(nil), r.Opaque.Parameters...),
 		}
 	}
-	return out
+	return r
 }
 
 // GroupingResult holds all computed grouping instances for a single node.
@@ -338,10 +324,7 @@ func (b *GroupingBuilder) buildInstance(
 		Alignment:          alignment,
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),
-		PassthroughClasses: make(map[string]bool),
-		RequestClasses:     make(map[string]string),
-		RequestSelectors:   make(map[string][]string),
-		RequestOpaque:      make(map[string]*OpaqueConfig),
+		Requests:           make(map[string]RequestContract),
 		Devices:            devices,
 		ExtendedAttributes: make(map[string]DeviceAttributeValue),
 	}
@@ -362,19 +345,12 @@ func (b *GroupingBuilder) buildInstance(
 		if requestClass == "" {
 			requestClass = gd.Class
 		}
-		inst.RequestClasses[gd.Class] = requestClass
-		if len(gd.Selectors) > 0 {
-			inst.RequestSelectors[gd.Class] = append([]string(nil), gd.Selectors...)
-		}
-		if gd.Opaque != nil {
-			inst.RequestOpaque[gd.Class] = &OpaqueConfig{
-				Driver:     gd.Opaque.Driver,
-				Parameters: append([]byte(nil), gd.Opaque.Parameters...),
-			}
-		}
-		if gd.Passthrough {
-			inst.PassthroughClasses[gd.Class] = true
-		}
+		inst.Requests[gd.Class] = RequestContract{
+			Class:       requestClass,
+			Selectors:   gd.Selectors,
+			Opaque:      gd.Opaque,
+			Passthrough: gd.Passthrough,
+		}.clone()
 		if len(gd.Capacity) > 0 {
 			inst.DeviceCapacity[gd.Class] = gd.Capacity
 		}

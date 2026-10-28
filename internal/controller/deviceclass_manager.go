@@ -1329,10 +1329,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		groupingName     string
 		alignment        string
 		mode             OfferingMode
-		passthrough      map[string]bool
-		requestClasses   map[string]string
-		requestSelectors map[string][]string
-		requestOpaque    map[string]*OpaqueConfig
+		requests         map[string]RequestContract
 		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		acc              *deviceIntersectionState
@@ -1348,17 +1345,11 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				groupingName:     name,
 				alignment:        entry.representative.Alignment,
 				mode:             entry.representative.Mode,
-				passthrough:      make(map[string]bool, len(entry.representative.PassthroughClasses)),
-				requestClasses:   cloneRequestClasses(entry.representative.RequestClasses),
-				requestSelectors: cloneRequestSelectors(entry.representative.RequestSelectors),
-				requestOpaque:    cloneRequestOpaque(entry.representative.RequestOpaque),
+				requests:         entry.representative.Requests,
 				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				acc:              newDeviceIntersectionState(),
 				minInstanceIndex: entry.representative.InstanceIndex,
-			}
-			for class, enabled := range entry.representative.PassthroughClasses {
-				state.passthrough[class] = enabled
 			}
 			aggStates[name] = state
 		} else if state.contractKey != groupingRequestContractKey(entry.representative) {
@@ -1376,18 +1367,15 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	for name, state := range aggStates {
 		intersectedCounts, intersectedCap := state.acc.intersect(nil)
 		mergedRep := GroupingInstance{
-			GroupingName:       state.groupingName,
-			Alignment:          state.alignment,
-			Mode:               state.mode,
-			PassthroughClasses: state.passthrough,
-			RequestClasses:     state.requestClasses,
-			RequestSelectors:   state.requestSelectors,
-			RequestOpaque:      state.requestOpaque,
-			Intent:             state.intent,
-			DeviceCounts:       intersectedCounts,
-			DeviceCapacity:     intersectedCap,
-			Devices:            state.acc.devices,
-			InstanceIndex:      state.minInstanceIndex,
+			GroupingName:   state.groupingName,
+			Alignment:      state.alignment,
+			Mode:           state.mode,
+			Requests:       state.requests,
+			Intent:         state.intent,
+			DeviceCounts:   intersectedCounts,
+			DeviceCapacity: intersectedCap,
+			Devices:        state.acc.devices,
+			InstanceIndex:  state.minInstanceIndex,
 		}
 		aggregates[name] = &groupingEntry{
 			representative: mergedRep,
@@ -1448,18 +1436,9 @@ func groupingRequestContractKey(inst GroupingInstance) string {
 		mode = OfferingModeContainer
 	}
 	contract := struct {
-		Mode        OfferingMode             `json:"mode,omitempty"`
-		Passthrough map[string]bool          `json:"passthrough,omitempty"`
-		Classes     map[string]string        `json:"classes,omitempty"`
-		Selectors   map[string][]string      `json:"selectors,omitempty"`
-		Opaque      map[string]*OpaqueConfig `json:"opaque,omitempty"`
-	}{
-		Mode:        mode,
-		Passthrough: inst.PassthroughClasses,
-		Classes:     inst.RequestClasses,
-		Selectors:   inst.RequestSelectors,
-		Opaque:      inst.RequestOpaque,
-	}
+		Mode     OfferingMode               `json:"mode,omitempty"`
+		Requests map[string]RequestContract `json:"requests,omitempty"`
+	}{Mode: mode, Requests: inst.Requests}
 	data, _ := json.Marshal(contract)
 	return string(data)
 }
@@ -1520,25 +1499,16 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 	}
 
 	for driverClass, count := range inst.DeviceCounts {
-		requestClass := driverClass
-		if inst.RequestClasses != nil && inst.RequestClasses[driverClass] != "" {
-			requestClass = inst.RequestClasses[driverClass]
-		}
+		// Clone: the NUMA selector appended below must not write into the
+		// slice shared with the DeviceGrouping.
+		contract := inst.Requests[driverClass].clone()
 		sr := SubResourceConfig{
 			SourceDriver: m.driverForClass(driverClass),
-			DeviceClass:  requestClass,
+			DeviceClass:  inst.requestClass(driverClass),
 			Count:        count,
-			Passthrough:  config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
-		}
-		if inst.RequestSelectors != nil {
-			sr.Selectors = append(sr.Selectors, inst.RequestSelectors[driverClass]...)
-		}
-		if inst.RequestOpaque != nil && inst.RequestOpaque[driverClass] != nil {
-			opaque := inst.RequestOpaque[driverClass]
-			sr.Opaque = &OpaqueConfig{
-				Driver:     opaque.Driver,
-				Parameters: append([]byte(nil), opaque.Parameters...),
-			}
+			Passthrough:  config.Mode == OfferingModePassthrough && contract.Passthrough,
+			Selectors:    contract.Selectors,
+			Opaque:       contract.Opaque,
 		}
 
 		if cap, ok := inst.DeviceCapacity[driverClass]; ok {
@@ -1586,10 +1556,7 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			for driver := range inst.DeviceCounts {
 				rawDriver := m.driverForClass(driver)
 				if driversWithAttribute[baseDriverName(rawDriver)] {
-					requestClass := driver
-					if inst.RequestClasses != nil && inst.RequestClasses[driver] != "" {
-						requestClass = inst.RequestClasses[driver]
-					}
+					requestClass := inst.requestClass(driver)
 					constraintRequests = append(constraintRequests, requestClass)
 				}
 			}
