@@ -43,6 +43,7 @@ var (
 	partitionMode           string
 	shutdownTimeout         time.Duration
 	leaderElectionNamespace string
+	configNamespace         string
 	leaderElectionID        string
 	webhookPort             int
 	tlsCertFile             string
@@ -73,12 +74,14 @@ func init() {
 	rootCmd.Flags().StringVar(&driverName, "driver-name", "nodepartition.dra.k8s.io",
 		"DRA driver name used in generated DeviceClass selectors and opaque config")
 	rootCmd.Flags().StringVar(&partitionMode, "partition-mode", "auto",
-		`Partition strategy: "auto" (groupings if ConfigMaps exist, else fixed partitions), `+
+		`Partition strategy: "auto" (groupings if ConfigMaps exist in --config-namespace, else fixed partitions), `+
 			`"partitions" (always fixed hierarchy), or "groupings" (always admin-defined groupings)`)
 	rootCmd.Flags().DurationVar(&shutdownTimeout, "shutdown-timeout",
 		defaultShutdownTimeoutSec*time.Second, "Maximum time to wait for graceful shutdown")
 	rootCmd.Flags().StringVar(&leaderElectionNamespace, "leader-election-namespace", "kube-system",
 		"Namespace for leader election lease")
+	rootCmd.Flags().StringVar(&configNamespace, "config-namespace", os.Getenv("POD_NAMESPACE"),
+		"Only trust topology-rule and device-grouping ConfigMaps in this namespace; empty watches all namespaces")
 	rootCmd.Flags().StringVar(&leaderElectionID, "leader-election-id", "nodepartition-controller",
 		"Leader election lease name")
 	rootCmd.Flags().IntVar(&webhookPort, "webhook-port", 9443,
@@ -121,6 +124,7 @@ func runController(_ *cobra.Command, _ []string) error {
 	klog.Infof("Health check server started on port %d", healthCheckPort)
 
 	ctrl := controller.NewController(clientset, driverName, controller.PartitionMode(partitionMode))
+	ctrl.SetConfigNamespace(configNamespace)
 	if err := ctrl.StartCache(ctx); err != nil {
 		return fmt.Errorf("failed to start controller cache: %v", err)
 	}

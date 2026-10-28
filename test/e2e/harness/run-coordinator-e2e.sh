@@ -178,7 +178,7 @@ existing_classes=$(owned_class_names 2>/dev/null || true)
 [[ -z "$existing_classes" ]] || die "managed DeviceClasses already reference driver $DRIVER_NAME: $existing_classes"
 
 for file in "${INPUT_FILES[@]}"; do
-  existing=$(kubectl get -f "$file" -o name --ignore-not-found 2>/dev/null || true)
+  existing=$(kubectl -n "$COORDINATOR_NAMESPACE" get -f "$file" -o name --ignore-not-found 2>/dev/null || true)
   [[ -z "$existing" ]] || die "fixture already exists; refusing to take ownership: $existing"
 done
 
@@ -199,7 +199,7 @@ cleanup() {
   if [[ "$KEEP_RESOURCES" != true ]]; then
     helm uninstall "$RELEASE" --namespace "$COORDINATOR_NAMESPACE" >/dev/null 2>&1 || true
     for file in "${INPUT_FILES[@]}"; do
-      kubectl delete -f "$file" --ignore-not-found >/dev/null 2>&1 || true
+      kubectl -n "$COORDINATOR_NAMESPACE" delete -f "$file" --ignore-not-found >/dev/null 2>&1 || true
     done
     mark_owned_classes
     for class in "${OWNED_CLASSES[@]}"; do
@@ -212,13 +212,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The controller only trusts ConfigMaps in its own namespace, so fixtures
+# must be applied there.
+kubectl create namespace "$COORDINATOR_NAMESPACE"
+
 for file in "${INPUT_FILES[@]}"; do
-  kubectl apply -f "$file"
-  kubectl label -f "$file" "$RUN_LABEL" --overwrite >/dev/null
+  kubectl -n "$COORDINATOR_NAMESPACE" apply -f "$file"
+  kubectl -n "$COORDINATOR_NAMESPACE" label -f "$file" "$RUN_LABEL" --overwrite >/dev/null
 done
 
 if [[ "$TLS_MODE" == manual ]]; then
-  kubectl create namespace "$COORDINATOR_NAMESPACE"
   kubectl -n "$COORDINATOR_NAMESPACE" create secret tls "${RELEASE}-webhook-tls" \
     --cert="$TLS_CERT_FILE" --key="$TLS_KEY_FILE"
 fi

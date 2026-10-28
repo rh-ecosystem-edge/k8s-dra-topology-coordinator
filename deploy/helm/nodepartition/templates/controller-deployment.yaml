@@ -47,6 +47,11 @@ spec:
           args:
             - --driver-name={{ .Values.driverName }}
             - --partition-mode={{ .Values.partitionMode }}
+            {{- if .Values.controller.watchAllNamespaces }}
+            - --config-namespace=
+            {{- else }}
+            - --config-namespace={{ .Values.controller.configNamespace | default .Release.Namespace }}
+            {{- end }}
             - --shutdown-timeout={{ .Values.controller.shutdownTimeout }}
             - --leader-election-namespace={{ .Values.controller.leaderElection.namespace }}
             - --leader-election-id={{ .Values.controller.leaderElection.id }}

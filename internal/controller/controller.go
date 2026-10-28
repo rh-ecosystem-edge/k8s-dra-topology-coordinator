@@ -59,6 +59,10 @@ type Controller struct {
 	groupingBuilder  *GroupingBuilder
 	classManager     *DeviceClassManager
 
+	// configNamespace limits the topology-rule and grouping ConfigMaps the
+	// controller trusts to one namespace; empty watches every namespace.
+	configNamespace string
+
 	// synced is set after informer caches are synchronized. It is atomic because
 	// informer callbacks can run while StartCache is finishing.
 	// Event handlers skip enqueueing reconciles until this is true.
@@ -102,6 +106,13 @@ func NewController(client kubernetes.Interface, driverName string, partitionMode
 	}
 }
 
+// SetConfigNamespace limits the topology-rule and grouping ConfigMaps to ns.
+// An empty ns watches all namespaces, which lets anyone who can create a
+// labeled ConfigMap publish DeviceClasses. Call before StartCache.
+func (c *Controller) SetConfigNamespace(ns string) {
+	c.configNamespace = ns
+}
+
 // Model returns the topology model for use by the webhook.
 func (c *Controller) Model() *TopologyModel {
 	return c.model
@@ -116,8 +127,15 @@ func (c *Controller) StartCache(ctx context.Context) error {
 	// Set up informers
 	factory := informers.NewSharedInformerFactory(c.client, defaultResyncPeriod)
 
+	if c.configNamespace == "" {
+		klog.Warning("Watching coordinator ConfigMaps in all namespaces; any namespace can publish DeviceClasses")
+	} else {
+		klog.Infof("Watching coordinator ConfigMaps in namespace %q", c.configNamespace)
+	}
+
 	// Filtered factory for ConfigMaps with the topology-rule label only
 	cmFactory := informers.NewSharedInformerFactoryWithOptions(c.client, defaultResyncPeriod,
+		informers.WithNamespace(c.configNamespace),
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
 			opts.LabelSelector = TopologyRuleLabel + "=true"
 		}),
@@ -125,6 +143,7 @@ func (c *Controller) StartCache(ctx context.Context) error {
 
 	// Filtered factory for ConfigMaps with the device-grouping label
 	groupingCMFactory := informers.NewSharedInformerFactoryWithOptions(c.client, defaultResyncPeriod,
+		informers.WithNamespace(c.configNamespace),
 		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
 			opts.LabelSelector = DeviceGroupingLabel + "=true"
 		}),
