@@ -96,6 +96,7 @@ func (c *PartitionConfig) Validate() error {
 		return fmt.Errorf("subResources must not be empty")
 	}
 	seenClasses := make(map[string]struct{}, len(c.SubResources))
+	alignable := make(map[string]struct{}, 2*len(c.SubResources))
 	for i, sr := range c.SubResources {
 		if sr.DeviceClass == "" {
 			return fmt.Errorf("subResources[%d] missing deviceClass", i)
@@ -104,6 +105,12 @@ func (c *PartitionConfig) Validate() error {
 			return fmt.Errorf("subResources[%d] has duplicate deviceClass %q", i, sr.DeviceClass)
 		}
 		seenClasses[sr.DeviceClass] = struct{}{}
+		// Classes published before alignments used DeviceClass names
+		// referenced the source driver instead; accept both until they are rewritten.
+		if sr.SourceDriver != "" {
+			alignable[sr.SourceDriver] = struct{}{}
+		}
+		alignable[sr.DeviceClass] = struct{}{}
 		if sr.Count < 1 {
 			return fmt.Errorf("subResources[%d] count must be positive", i)
 		}
@@ -122,7 +129,7 @@ func (c *PartitionConfig) Validate() error {
 			return fmt.Errorf("alignments[%d] missing attribute", i)
 		}
 		for _, request := range alignment.Requests {
-			if _, exists := seenClasses[request]; !exists {
+			if _, exists := alignable[request]; !exists {
 				return fmt.Errorf("alignments[%d] references unknown deviceClass %q", i, request)
 			}
 		}
