@@ -35,6 +35,9 @@ func (o *OpaqueConfig) validate() error {
 	return nil
 }
 
+// maxDriverNameLength is the DRA limit for a driver name.
+const maxDriverNameLength = 63
+
 // DeviceGroupingLabel identifies ConfigMaps containing device grouping definitions.
 const DeviceGroupingLabel = "nodepartition.dra.k8s.io/device-grouping"
 
@@ -53,12 +56,16 @@ type GroupingDevice struct {
 	Class string `json:"class"`
 	// RequestClass optionally selects a different driver-owned DeviceClass in
 	// the generated claim (for example, dra.nvme-vfio instead of dra.nvme).
-	RequestClass string            `json:"requestClass,omitempty"`
-	Count        int               `json:"count"`
-	Capacity     map[string]string `json:"capacity,omitempty"`
-	Passthrough  bool              `json:"passthrough,omitempty"`
-	Selectors    []string          `json:"selectors,omitempty"`
-	Opaque       *OpaqueConfig     `json:"opaque,omitempty"`
+	RequestClass string `json:"requestClass,omitempty"`
+	// RequestDriver is the driver whose devices RequestClass allocates. It
+	// selects the attribute domain for the generated NUMA selector and
+	// alignments; empty means the driver that publishes Class.
+	RequestDriver string            `json:"requestDriver,omitempty"`
+	Count         int               `json:"count"`
+	Capacity      map[string]string `json:"capacity,omitempty"`
+	Passthrough   bool              `json:"passthrough,omitempty"`
+	Selectors     []string          `json:"selectors,omitempty"`
+	Opaque        *OpaqueConfig     `json:"opaque,omitempty"`
 }
 
 // IntentMetadata adds optional human-readable metadata to a device grouping.
@@ -158,11 +165,12 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 		devicesCopy := make([]GroupingDevice, len(g.Devices))
 		for i, d := range g.Devices {
 			gd := GroupingDevice{
-				Class:        d.Class,
-				RequestClass: d.RequestClass,
-				Count:        d.Count,
-				Passthrough:  d.Passthrough,
-				Selectors:    append([]string(nil), d.Selectors...),
+				Class:         d.Class,
+				RequestClass:  d.RequestClass,
+				RequestDriver: d.RequestDriver,
+				Count:         d.Count,
+				Passthrough:   d.Passthrough,
+				Selectors:     append([]string(nil), d.Selectors...),
 			}
 			if d.Capacity != nil {
 				gd.Capacity = make(map[string]string, len(d.Capacity))
@@ -317,6 +325,17 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		seenRequestClasses[requestClass] = struct{}{}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
+		}
+		if d.RequestDriver != "" {
+			if d.RequestClass == "" {
+				return g, fmt.Errorf("device[%d] requestDriver requires requestClass", i)
+			}
+			if problems := validation.IsDNS1123Subdomain(d.RequestDriver); len(problems) > 0 || len(d.RequestDriver) > maxDriverNameLength {
+				return g, fmt.Errorf("device[%d] requestDriver %q is not a valid driver name", i, d.RequestDriver)
+			}
+			if d.Opaque != nil && d.Opaque.Driver != d.RequestDriver {
+				return g, fmt.Errorf("device[%d] opaque driver %q must match requestDriver %q", i, d.Opaque.Driver, d.RequestDriver)
+			}
 		}
 		if d.Opaque != nil {
 			if err := d.Opaque.validate(); err != nil {

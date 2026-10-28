@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -293,6 +294,49 @@ func TestParseDeviceGrouping_RailValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseDeviceGrouping_RequestDriver(t *testing.T) {
+	const opaque = "\n  opaque:\n    driver: %s\n    parameters:\n      kind: Vfio"
+	tests := []struct {
+		name    string
+		devices string
+		wantErr string
+	}{
+		{"valid", "- class: gpu.example.com\n  count: 1\n  requestClass: vfio.gpu.example.com\n  requestDriver: vfio.example.com", ""},
+		{"requires requestClass", "- class: gpu.example.com\n  count: 1\n  requestDriver: vfio.example.com", "requestDriver requires requestClass"},
+		{"invalid name", "- class: gpu.example.com\n  count: 1\n  requestClass: v\n  requestDriver: Not_A_Driver", "not a valid driver name"},
+		{"too long", "- class: gpu.example.com\n  count: 1\n  requestClass: v\n  requestDriver: " + strings.Repeat("a", 64), "not a valid driver name"},
+		{"passthrough without opaque", "- class: gpu.example.com\n  count: 1\n  passthrough: true\n  requestClass: v\n  requestDriver: vfio.example.com", ""},
+		{"opaque driver mismatch", "- class: gpu.example.com\n  count: 1\n  passthrough: true\n  requestClass: v\n  requestDriver: vfio.example.com" + fmt.Sprintf(opaque, "other.example.com"), "must match requestDriver"},
+		{"opaque driver matches", "- class: gpu.example.com\n  count: 1\n  passthrough: true\n  requestClass: v\n  requestDriver: vfio.example.com" + fmt.Sprintf(opaque, "vfio.example.com"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := validGroupingData("gpu-vfio")
+			data["devices"] = tt.devices
+			if strings.Contains(tt.devices, "passthrough: true") {
+				data["mode"] = "passthrough"
+			}
+			grouping, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "vfio.example.com", grouping.Devices[0].RequestDriver)
+		})
+	}
+}
+
+func TestGroupingStore_GetGroupingsCopiesRequestDriver(t *testing.T) {
+	data := validGroupingData("gpu-vfio")
+	data["devices"] = "- class: gpu.example.com\n  count: 1\n  requestClass: v\n  requestDriver: vfio.example.com"
+	store := NewGroupingStore()
+	require.NoError(t, store.LoadFromConfigMap(makeGroupingConfigMap("gpu-vfio", data)))
+	groupings := store.GetGroupings()
+	require.Len(t, groupings, 1)
+	assert.Equal(t, "vfio.example.com", groupings[0].Devices[0].RequestDriver)
 }
 
 func TestParseDeviceGrouping_InvalidMode(t *testing.T) {
@@ -593,9 +637,9 @@ func TestGroupingBuilder_BuildGroupingsCarriesRequestContract(t *testing.T) {
 		Devices: []GroupingDevice{
 			{
 				Class: "gpu.amd.com", Count: 1, Passthrough: true,
-				RequestClass: "vfio.gpu.amd.com",
-				Selectors:    []string{`device.attributes["gpu.amd.com"].isVF == true`},
-				Opaque:       opaque,
+				RequestClass: "vfio.gpu.amd.com", RequestDriver: "vfio.amd.com",
+				Selectors: []string{`device.attributes["gpu.amd.com"].isVF == true`},
+				Opaque:    opaque,
 			},
 			{Class: "dpu.pensando.com", Count: 1},
 		},
@@ -608,6 +652,7 @@ func TestGroupingBuilder_BuildGroupingsCarriesRequestContract(t *testing.T) {
 
 	assert.Equal(t, RequestContract{
 		Class:       "vfio.gpu.amd.com",
+		Driver:      "vfio.amd.com",
 		Selectors:   []string{`device.attributes["gpu.amd.com"].isVF == true`},
 		Opaque:      opaque,
 		Passthrough: true,
