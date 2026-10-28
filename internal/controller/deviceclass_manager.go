@@ -26,6 +26,12 @@ const (
 	// DeviceClass labels and annotations. The DRA driver name in opaque config
 	// is configurable through --driver-name.
 	CoordinatorDriverName = "nodepartition.dra.k8s.io"
+
+	// PartitionConfigAPIVersion versions the PartitionConfig schema embedded in
+	// managed DeviceClasses. Any change to a field that affects claim expansion
+	// requires a new version, so a webhook that does not understand it denies
+	// the claim instead of silently expanding it without that field.
+	PartitionConfigAPIVersion = CoordinatorDriverName + "/v1alpha1"
 )
 
 // CouplingLevel indicates the topology tightness of a partition's constraints.
@@ -43,7 +49,9 @@ const (
 // PartitionConfig is the opaque configuration embedded in DeviceClass config.
 // It tells the webhook how to expand a partition claim into sub-resource requests.
 type PartitionConfig struct {
-	Kind string `json:"kind"`
+	// APIVersion is empty on classes published before versioning existed.
+	APIVersion string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind"`
 	// Mode identifies whether this catalog offering is container-safe or
 	// explicitly intended for VM passthrough.
 	Mode         OfferingMode        `json:"mode,omitempty"`
@@ -833,8 +841,9 @@ func (m *DeviceClassManager) buildDeviceClassFromCache(profile string, partType 
 // buildPartitionConfig builds the opaque PartitionConfig from the representative partition.
 func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representative PartitionDevice) (PartitionConfig, CouplingLevel) {
 	config := PartitionConfig{
-		Kind: "PartitionConfig",
-		Mode: OfferingModeContainer,
+		APIVersion: PartitionConfigAPIVersion,
+		Kind:       "PartitionConfig",
+		Mode:       OfferingModeContainer,
 	}
 
 	// Sub-resources: one entry per driver with its device count, optional capacity,
@@ -993,8 +1002,9 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 // device counts but lets the scheduler choose placement freely.
 func (m *DeviceClassManager) buildPartitionAggregateConfig(representative PartitionDevice) (PartitionConfig, CouplingLevel) {
 	config := PartitionConfig{
-		Kind: "PartitionConfig",
-		Mode: OfferingModeContainer,
+		APIVersion: PartitionConfigAPIVersion,
+		Kind:       "PartitionConfig",
+		Mode:       OfferingModeContainer,
 	}
 
 	for driver, count := range representative.DeviceCounts {
@@ -1498,8 +1508,9 @@ func (m *DeviceClassManager) buildGroupingAggregateConfig(inst GroupingInstance)
 
 func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, includeNUMA bool) PartitionConfig {
 	config := PartitionConfig{
-		Kind: "PartitionConfig",
-		Mode: inst.Mode,
+		APIVersion: PartitionConfigAPIVersion,
+		Kind:       "PartitionConfig",
+		Mode:       inst.Mode,
 	}
 	if config.Mode == "" {
 		config.Mode = OfferingModeContainer

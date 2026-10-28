@@ -854,6 +854,51 @@ func TestDeviceClassLookupErrorIsRejected(t *testing.T) {
 	assert.False(t, resp.Response.Allowed)
 }
 
+func TestPartitionConfigVersionAndStrictDecoding(t *testing.T) {
+	const body = `"kind":"PartitionConfig","subResources":[{"deviceClass":"gpu.amd.com","count":1}],"alignments":[]`
+	tests := []struct {
+		name    string
+		raw     string
+		managed bool
+		wantErr string
+	}{
+		{"managed current version", `{"apiVersion":"` + controller.PartitionConfigAPIVersion + `",` + body + `}`, true, ""},
+		{"managed legacy without version", `{` + body + `}`, true, ""},
+		{"managed unsupported version", `{"apiVersion":"nodepartition.dra.k8s.io/v2",` + body + `}`, true, "unsupported PartitionConfig apiVersion"},
+		{"managed unknown field", `{` + body + `,"futureField":true}`, true, "invalid PartitionConfig"},
+		{"unmanaged unknown field stays lenient", `{` + body + `,"futureField":true}`, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dc := makeRegularDeviceClass("versioned")
+			dc.Spec.Config = []resourcev1.DeviceClassConfiguration{{
+				DeviceConfiguration: resourcev1.DeviceConfiguration{Opaque: &resourcev1.OpaqueDeviceConfiguration{
+					Driver:     driverName,
+					Parameters: runtime.RawExtension{Raw: []byte(tt.raw)},
+				}},
+			}}
+			if tt.managed {
+				dc.Labels = map[string]string{controller.CoordinatorDriverName + "/managed": "true"}
+			}
+			expander := NewClaimExpander(fake.NewSimpleClientset(dc))
+			claim := &resourcev1.ResourceClaim{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+				Requests: []resourcev1.DeviceRequest{{
+					Name:    "req",
+					Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "versioned", Count: 1},
+				}},
+			}}}
+
+			patches, err := expander.expandClaim(context.Background(), claim)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, patches, "claim should be expanded")
+		})
+	}
+}
+
 func TestInvalidPartitionConfigReturnsAllow(t *testing.T) {
 	// Create a DeviceClass with our driver but invalid/non-PartitionConfig opaque data
 	invalidJSON := []byte(`{"kind":"SomethingElse","foo":"bar"}`)

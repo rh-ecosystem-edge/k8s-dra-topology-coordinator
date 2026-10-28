@@ -2192,3 +2192,12 @@ func TestPartitionConfigValidate_AlignmentAcceptsLegacySourceDriver(t *testing.T
 	config.Alignments[0].Requests = []string{"unknown"}
 	require.ErrorContains(t, config.Validate(), "unknown deviceClass")
 }
+
+func TestDeviceClassManager_PublishedPartitionConfigsCarryAPIVersion(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	inst := multiDeviceGroupingInstance(0)
+	assert.Equal(t, PartitionConfigAPIVersion, manager.buildGroupingConfig(inst).APIVersion)
+	assert.Equal(t, PartitionConfigAPIVersion, manager.buildGroupingAggregateConfig(inst).APIVersion)
+	partition, _ := manager.buildPartitionConfig(PartitionPCIeRoot, PartitionDevice{DeviceCounts: map[string]int{"gpu.amd.com": 1}})
+	assert.Equal(t, PartitionConfigAPIVersion, partition.APIVersion)
+}

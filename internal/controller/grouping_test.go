@@ -339,6 +339,35 @@ func TestGroupingStore_GetGroupingsCopiesRequestDriver(t *testing.T) {
 	assert.Equal(t, "vfio.example.com", groupings[0].Devices[0].RequestDriver)
 }
 
+func TestParseDeviceGrouping_RejectsUnknownDeviceKeys(t *testing.T) {
+	tests := map[string]string{
+		"typo":      "- class: gpu.example.com\n  count: 1\n  passthru: true",
+		"duplicate": "- class: gpu.example.com\n  count: 1\n  count: 2",
+	}
+	for name, devices := range tests {
+		t.Run(name, func(t *testing.T) {
+			data := validGroupingData("gpu-vfio")
+			data["devices"] = devices
+			_, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "failed to parse devices YAML")
+		})
+	}
+
+	data := validGroupingData("gpu-vfio")
+	data["devices"] = "- class: gpu.example.com\n  count: 1\n  passthru: true"
+	_, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+	assert.Contains(t, err.Error(), "passthru")
+}
+
+func TestParseDeviceGrouping_UnknownTopLevelKeyIsIgnored(t *testing.T) {
+	data := validGroupingData("gpu-vfio")
+	data["rial"] = "true"
+	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("gpu-vfio", data))
+	require.NoError(t, err)
+	assert.False(t, grouping.Rail)
+}
+
 func TestParseDeviceGrouping_InvalidMode(t *testing.T) {
 	data := validGroupingData("test")
 	data["mode"] = "vm"
