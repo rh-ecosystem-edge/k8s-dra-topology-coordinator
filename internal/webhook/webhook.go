@@ -736,7 +736,7 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 		}
 
 		var partConfig controller.PartitionConfig
-		if err := json.Unmarshal(cfg.Opaque.Parameters.Raw, &partConfig); err != nil {
+		if err := decodePartitionConfig(cfg.Opaque.Parameters.Raw, &partConfig, managed); err != nil {
 			klog.Warningf("Failed to unmarshal opaque config for DeviceClass %q: %v", deviceClassName, err)
 			if managed {
 				return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has invalid PartitionConfig: %w", deviceClassName, err)}
@@ -757,6 +757,10 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 			continue
 		}
 
+		if managed && partConfig.APIVersion != "" && partConfig.APIVersion != controller.PartitionConfigAPIVersion {
+			return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has unsupported PartitionConfig apiVersion %q", deviceClassName, partConfig.APIVersion)}
+		}
+
 		return &partConfig, managed, nil
 	}
 
@@ -764,6 +768,19 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 		return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has no PartitionConfig", deviceClassName)}
 	}
 	return nil, false, nil
+}
+
+// decodePartitionConfig decodes a PartitionConfig. Managed classes are decoded
+// strictly so a field this webhook does not know (from a newer controller) is
+// an error instead of being dropped; other classes stay lenient so a foreign
+// config is never mistaken for one of ours.
+func decodePartitionConfig(raw []byte, out *controller.PartitionConfig, strict bool) error {
+	if !strict {
+		return json.Unmarshal(raw, out)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode(out)
 }
 
 // sanitizeDeviceClassName converts a device class name into a DNS-label-safe suffix.

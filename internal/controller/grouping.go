@@ -203,8 +203,22 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 	return result
 }
 
+// knownGroupingKeys are the data keys parseDeviceGrouping reads.
+var knownGroupingKeys = map[string]struct{}{
+	"alignment": {}, "categories": {}, "description": {}, "devices": {}, "displayName": {},
+	"fallback": {}, "intentLevel": {}, "mode": {}, "name": {}, "rail": {},
+	"visibility": {}, "workloadTypes": {},
+}
+
 func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	g := DeviceGrouping{}
+	// Unknown top-level keys fall back to safe defaults, so warn rather than
+	// reject; unknown keys inside "devices" are rejected below.
+	for key := range cm.Data {
+		if _, ok := knownGroupingKeys[key]; !ok {
+			klog.Warningf("Grouping ConfigMap %s/%s has unknown data key %q; it is ignored", cm.Namespace, cm.Name, key)
+		}
+	}
 	g.Mode = OfferingMode(cm.Data["mode"])
 	if g.Mode == "" {
 		g.Mode = OfferingModeContainer
@@ -297,7 +311,7 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 
 	var devices []GroupingDevice
-	if err := yaml.Unmarshal([]byte(devicesYAML), &devices); err != nil {
+	if err := yaml.UnmarshalStrict([]byte(devicesYAML), &devices); err != nil {
 		return g, fmt.Errorf("failed to parse devices YAML: %w", err)
 	}
 
