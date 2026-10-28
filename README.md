@@ -411,6 +411,8 @@ curl http://127.0.0.1:8081/healthz
 curl http://127.0.0.1:8081/metrics
 ```
 
+Port `8081` serves `/metrics` unauthenticated over plain HTTP. Set `controller.metrics.enabled=false` to disable it.
+
 The registered controller metrics are:
 
 | Metric | Type | Description |
@@ -420,6 +422,12 @@ The registered controller metrics are:
 | `nodepartition_controller_nodes_total` | Gauge | Nodes represented in the current topology result |
 | `nodepartition_controller_deviceclasses_total` | Gauge | Managed partition and grouping DeviceClasses |
 | `nodepartition_controller_topology_rules_total` | Gauge | Active topology rules |
+
+## Security notes
+
+The webhook port (`controller.webhook.port`) must be reachable only by the Kubernetes API server. The handlers trust the namespace and name in the AdmissionReview and cannot authenticate callers without client certificates, so restrict access with the chart NetworkPolicy (`controller.networkPolicy.enabled=true`).
+
+DeviceClass names are not scoped to a release: two releases with different `--driver-name` values in one cluster still collide on same-named DeviceClasses. Changing `--driver-name` also leaves the old driver's classes undeleted; remove them manually.
 
 ## End-to-end testing
 

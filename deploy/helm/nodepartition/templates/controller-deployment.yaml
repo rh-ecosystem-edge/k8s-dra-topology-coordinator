@@ -58,6 +58,9 @@ spec:
             - --webhook-port={{ .Values.controller.webhook.port }}
             - --tls-cert=/etc/webhook/tls/tls.crt
             - --tls-key=/etc/webhook/tls/tls.key
+            {{- if not .Values.controller.metrics.enabled }}
+            - --enable-metrics=false
+            {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.controller.healthPort }}

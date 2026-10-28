@@ -32,6 +32,7 @@ assert_rendered cert-manager "$cert_manager" 'name: claims.nodepartition.dra.k8s
 assert_rendered cert-manager "$cert_manager" 'name: vmis.nodepartition.dra.k8s.io'
 assert_rendered cert-manager "$cert_manager" 'name: pods.nodepartition.dra.k8s.io'
 assert_rendered cert-manager "$cert_manager" 'resources: ["leases"]'
+assert_rendered cert-manager "$cert_manager" 'kind: Role'
 
 openshift=$(helm template e2e "$CHART" \
     --set controller.webhook.tls.mode=openshift)
@@ -48,5 +49,9 @@ network_policy=$(helm template e2e "$CHART" \
 assert_rendered network-policy "$network_policy" 'kind: NetworkPolicy'
 assert_rendered network-policy "$network_policy" 'port: 9443'
 assert_rendered network-policy "$network_policy" 'port: 6443'
+
+metrics_off=$(helm template e2e "$CHART" \
+    --set controller.metrics.enabled=false)
+assert_rendered metrics-off "$metrics_off" '--enable-metrics=false'
 
 echo "Helm E2E assertions passed"

@@ -32,6 +32,9 @@ controller:
   leaderElection:
     namespace: "kube-system"
     id: "nodepartition-controller"
+  metrics:
+    # Serve /metrics on the health port (8081), unauthenticated over plain HTTP.
+    enabled: true
   webhook:
     port: 9443
     tls:
