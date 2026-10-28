@@ -1463,28 +1463,9 @@ func TestSanitizeDeviceClassName(t *testing.T) {
 		{"gpu.nvidia.com", "gpu-nvidia-com"},
 		{"rdma.mellanox.com", "rdma-mellanox-com"},
 		{"simple", "simple"},
-		{"UPPER.Case", "upper-case"},
-		{"a..b", "a-b"},
-		{"", "sub"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := sanitizeDeviceClassName(tt.input)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestSanitizeForRequestName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"gpu.nvidia.com", "gpu-nvidia-com"},
 		{"sriovnetwork.k8snetworkplumbingwg.io", "sriovnetwork-k8snetworkplumbingwg-io"},
 		{"dra.cpu", "dra-cpu"},
-		{"simple", "simple"},
+		{"UPPER.Case", "upper-case"},
 		{"UPPER/Case", "upper-case"},
 		{"a..b", "a-b"},
 		{"", "sub"},
@@ -1492,7 +1473,7 @@ func TestSanitizeForRequestName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := sanitizeForRequestName(tt.input)
+			got := sanitizeDeviceClassName(tt.input)
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -19,6 +19,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
+
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/naming"
 )
 
 const (
@@ -1149,25 +1151,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 // deviceClassName generates a deterministic DeviceClass name.
 func (m *DeviceClassManager) deviceClassName(profile string, partType PartitionType) string {
 	// Sanitize profile for DNS label compatibility
-	sanitized := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return '-'
-	}, profile)
-
-	// Trim leading/trailing dashes and collapse consecutive dashes
-	for strings.Contains(sanitized, "--") {
-		sanitized = strings.ReplaceAll(sanitized, "--", "-")
-	}
-	sanitized = strings.Trim(sanitized, "-")
-
-	if sanitized == "" {
-		sanitized = "default"
-	}
+	sanitized := naming.Sanitize(profile, "default")
 
 	// Truncate profile to fit within DNS label limits (63 chars max)
 	// Keep partition type suffix intact for uniqueness
@@ -1778,24 +1762,7 @@ func (m *DeviceClassManager) driverForClass(className string) string {
 
 // sanitizeDNSLabel converts a string to a valid DNS label (max 63 chars).
 func sanitizeDNSLabel(s string) string {
-	sanitized := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return '-'
-	}, s)
-
-	for strings.Contains(sanitized, "--") {
-		sanitized = strings.ReplaceAll(sanitized, "--", "-")
-	}
-	sanitized = strings.Trim(sanitized, "-")
-
-	if sanitized == "" {
-		sanitized = "default"
-	}
+	sanitized := naming.Sanitize(s, "default")
 
 	if len(sanitized) > 63 {
 		h := sha256.Sum256([]byte(sanitized))

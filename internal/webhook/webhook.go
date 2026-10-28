@@ -26,6 +26,7 @@ import (
 	klog "k8s.io/klog/v2"
 
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/naming"
 )
 
 const (
@@ -785,27 +786,7 @@ func decodePartitionConfig(raw []byte, out *controller.PartitionConfig, strict b
 
 // sanitizeDeviceClassName converts a device class name into a DNS-label-safe suffix.
 func sanitizeDeviceClassName(name string) string {
-	sanitized := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return '-'
-	}, name)
-
-	// Collapse consecutive dashes
-	for strings.Contains(sanitized, "--") {
-		sanitized = strings.ReplaceAll(sanitized, "--", "-")
-	}
-	sanitized = strings.Trim(sanitized, "-")
-
-	if sanitized == "" {
-		sanitized = "sub"
-	}
-
-	return sanitized
+	return naming.Sanitize(name, "sub")
 }
 
 // handlePodAdmission rewrites container resource claim request names to match
@@ -1256,10 +1237,6 @@ func pickExpandedRequest(names []string, kind, deviceName string, used map[strin
 		}
 	}
 	return "", false
-}
-
-func sanitizeForRequestName(s string) string {
-	return sanitizeDeviceClassName(s)
 }
 
 // nestedSlice extracts a nested []interface{} from a map hierarchy.

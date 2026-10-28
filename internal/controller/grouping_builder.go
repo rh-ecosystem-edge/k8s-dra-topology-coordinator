@@ -423,6 +423,7 @@ func (b *GroupingBuilder) filterOutDevices(
 }
 
 // sanitizeForName converts a topology attribute name to a DNS-label-safe suffix.
+// It is not a general DNS-label sanitizer (see naming.Sanitize): it only replaces "/", "." and ":".
 func sanitizeForName(s string) string {
 	return strings.ToLower(strings.NewReplacer(
 		"/", "-",
