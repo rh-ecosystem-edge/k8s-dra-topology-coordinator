@@ -8,8 +8,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,6 +50,7 @@ var (
 	webhookPort             int
 	tlsCertFile             string
 	tlsKeyFile              string
+	enableMetrics           bool
 )
 
 var rootCmd = &cobra.Command{
@@ -90,6 +93,8 @@ func init() {
 		"Path to TLS certificate for webhook server")
 	rootCmd.Flags().StringVar(&tlsKeyFile, "tls-key", "/etc/webhook/tls/tls.key",
 		"Path to TLS private key for webhook server")
+	rootCmd.Flags().BoolVar(&enableMetrics, "enable-metrics", true,
+		"Serve unauthenticated Prometheus metrics at /metrics on the health port")
 }
 
 func runController(_ *cobra.Command, _ []string) error {
@@ -116,7 +121,9 @@ func runController(_ *cobra.Command, _ []string) error {
 	const healthCheckPort = 8081
 	healthChecker := health.NewChecker(healthCheckPort, "1.0.0")
 	healthChecker.AddCheck("basic", health.BasicHealthCheck())
-	healthChecker.Handle("/metrics", metrics.Handler())
+	if enableMetrics {
+		healthChecker.Handle("/metrics", metrics.Handler())
+	}
 
 	if err := healthChecker.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start health checker: %v", err)
@@ -201,7 +208,7 @@ func runController(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func startWebhookServer(_ context.Context, clientset kubernetes.Interface, configuredDriverName string, model *controller.TopologyModel) (*http.Server, error) { //nolint:unparam // error return reserved for TLS validation
+func startWebhookServer(_ context.Context, clientset kubernetes.Interface, configuredDriverName string, model *controller.TopologyModel) (*http.Server, error) {
 	expander := webhook.NewClaimExpanderWithDriver(clientset, configuredDriverName, model)
 
 	mux := http.NewServeMux()
@@ -214,12 +221,10 @@ func startWebhookServer(_ context.Context, clientset kubernetes.Interface, confi
 		WriteTimeout: 10 * time.Second,
 	}
 
-	// Load TLS certificate
+	// A failurePolicy:Fail webhook with no listener would block claim creation cluster-wide.
 	cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
 	if err != nil {
-		klog.Warningf("Failed to load TLS certificate from %s/%s: %v (webhook will not start)", tlsCertFile, tlsKeyFile, err)
-		klog.Warning("Webhook server disabled — partition claims will not be expanded")
-		return server, nil
+		return nil, fmt.Errorf("load webhook TLS keypair %s/%s: %w", tlsCertFile, tlsKeyFile, err)
 	}
 
 	server.TLSConfig = &tls.Config{
@@ -227,9 +232,14 @@ func startWebhookServer(_ context.Context, clientset kubernetes.Interface, confi
 		MinVersion:   tls.VersionTLS12,
 	}
 
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on webhook address %s: %w", server.Addr, err)
+	}
+
 	go func() {
 		klog.Infof("Starting webhook server on port %d", webhookPort)
-		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		if err := server.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.Errorf("Webhook server error: %v", err)
 		}
 	}()
