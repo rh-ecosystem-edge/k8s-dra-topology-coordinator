@@ -8,6 +8,7 @@ import (
 	stdliberrors "errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	resourcev1 "k8s.io/api/resource/v1"
@@ -1434,16 +1435,38 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 }
 
 func groupingInstanceKey(inst GroupingInstance) string {
-	nk := numaKey(inst.NUMANodes)
-	pk := strings.Join(inst.PCIeRoots, "-")
 	key := truncateLabel(inst.GroupingName) + "-" + sanitizeForName(inst.Alignment)
-	if pk != "" {
-		// Keep the raw topology value in the internal key. The published
-		// DeviceClass name is sanitized separately, so two distinct roots that
-		// normalize to the same DNS label remain distinguishable here.
-		key += "-" + pk
-	} else if nk != "" {
-		key += "-numa" + nk
+	// Only the requested alignment identifies an instance. Other topology
+	// attributes may differ between devices that share the same published
+	// DeviceClass and must not create duplicate entries.
+	switch inst.Alignment {
+	case "pcieRoot":
+		if len(inst.PCIeRoots) > 0 {
+			// Keep the raw topology value in the internal key. The published
+			// DeviceClass name is sanitized separately, so two distinct roots
+			// that normalize to the same DNS label remain distinguishable.
+			key += "-" + strings.Join(inst.PCIeRoots, "-")
+		} else {
+			key += fmt.Sprintf("-instance%d", inst.InstanceIndex)
+		}
+	case "numaNode":
+		if nk := numaKey(inst.NUMANodes); nk != "" {
+			key += "-numa" + nk
+		} else {
+			key += fmt.Sprintf("-instance%d", inst.InstanceIndex)
+		}
+	case "socket":
+		if len(inst.Sockets) > 0 {
+			values := make([]string, len(inst.Sockets))
+			for i, value := range inst.Sockets {
+				values[i] = strconv.FormatInt(value, 10)
+			}
+			key += "-socket" + strings.Join(values, "-")
+		} else {
+			key += fmt.Sprintf("-instance%d", inst.InstanceIndex)
+		}
+	default:
+		key += fmt.Sprintf("-instance%d", inst.InstanceIndex)
 	}
 	return key
 }
