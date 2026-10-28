@@ -1496,6 +1496,19 @@ func (m *DeviceClassManager) buildGroupingAggregateConfig(inst GroupingInstance)
 	return m.buildGroupingConfigInternal(inst, false)
 }
 
+func groupingAlignmentForRule(rule TopologyRule) string {
+	switch {
+	case rule.Attribute == AttrPCIeRoot || rule.MapsTo == MapsToPCIeRoot:
+		return "pcieRoot"
+	case rule.Attribute == AttrNUMANode || rule.MapsTo == MapsToNUMANode:
+		return "numaNode"
+	case rule.Attribute == AttrSocket || rule.MapsTo == MapsToSocket:
+		return "socket"
+	default:
+		return ""
+	}
+}
+
 func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, includeNUMA bool) PartitionConfig {
 	config := PartitionConfig{
 		Kind: "PartitionConfig",
@@ -1550,6 +1563,12 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 
 	matchRules := m.rules.GetMatchConstraintRules()
 	for _, rule := range matchRules {
+		// Standard topology constraints must match the alignment that produced
+		// this DeviceClass. A fallback instance has its own Alignment value, so
+		// it is only used when the grouping explicitly requested that fallback.
+		if alignment := groupingAlignmentForRule(rule); alignment != "" && alignment != inst.Alignment {
+			continue
+		}
 		if rule.Driver != "" {
 			if _, ok := inst.DeviceCounts[m.rules.GetDeviceClassForDriver(rule.Driver)]; !ok {
 				continue

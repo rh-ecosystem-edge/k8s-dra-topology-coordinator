@@ -1460,6 +1460,51 @@ func TestDeviceClassManager_GroupingConfigCarriesPassthroughMode(t *testing.T) {
 	}
 }
 
+func TestDeviceClassManager_NUMAGroupingUsesRequestedAlignment(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	instance := GroupingInstance{
+		Alignment:    "numaNode",
+		DeviceCounts: map[string]int{"gpu.nvidia.com": 1, "rdma.mellanox.com": 1},
+		Devices: []TopologyDevice{
+			makeTestDevice("gpu.nvidia.com", "gpu-0", int64Ptr(0), stringPtr("pci0000:00")),
+			makeTestDevice("rdma.mellanox.com", "rdma-0", int64Ptr(0), stringPtr("pci0000:01")),
+		},
+	}
+
+	config := manager.buildGroupingConfig(instance)
+
+	for _, alignment := range config.Alignments {
+		assert.NotEqual(t, AttrPCIeRoot, alignment.Attribute,
+			"NUMA grouping must not inherit the built-in PCIe-root constraint")
+	}
+}
+
+func TestDeviceClassManager_ExplicitPCIeRuleDoesNotOverrideNUMAAlignment(t *testing.T) {
+	rules := NewTopologyRuleStore()
+	require.NoError(t, rules.LoadFromConfigMap(makeTopologyRuleConfigMap("pcie-root", "default", map[string]string{
+		"attribute":  AttrPCIeRoot,
+		"type":       "string",
+		"driver":     "gpu.nvidia.com",
+		"constraint": "match",
+	})))
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, rules)
+	instance := GroupingInstance{
+		Alignment:    "numaNode",
+		DeviceCounts: map[string]int{"gpu.nvidia.com": 1, "rdma.mellanox.com": 1},
+		Devices: []TopologyDevice{
+			makeTestDevice("gpu.nvidia.com", "gpu-0", int64Ptr(0), stringPtr("pci0000:00")),
+			makeTestDevice("rdma.mellanox.com", "rdma-0", int64Ptr(0), stringPtr("pci0000:01")),
+		},
+	}
+
+	config := manager.buildGroupingConfig(instance)
+
+	for _, alignment := range config.Alignments {
+		assert.NotEqual(t, AttrPCIeRoot, alignment.Attribute,
+			"explicit PCIe-root rules must not override a NUMA grouping alignment")
+	}
+}
+
 func TestDeviceClassManager_ContainerGroupingDoesNotCarryPassthrough(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
