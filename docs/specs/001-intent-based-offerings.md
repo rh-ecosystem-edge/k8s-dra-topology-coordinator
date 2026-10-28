@@ -219,7 +219,7 @@ make lint      # if golangci-lint is available in your environment; report if no
 Manual check against a cluster or envtest with the grouping path active:
 
 ```bash
-kubectl apply -f examples/intent-workload-gpu-inference.yaml
+kubectl apply -n nodepartition -f examples/intent-workload-gpu-inference.yaml
 kubectl get deviceclasses -l nodepartition.dra.k8s.io/intent-level=workload
 kubectl get deviceclass gpu-inference -o yaml   # confirm labels, annotations, and unchanged Spec.Config
 ```

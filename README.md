@@ -129,13 +129,14 @@ During admission, the webhook expands the partition request into the underlying 
 
 ## Topology rules
 
-Topology rules are ConfigMaps labeled `nodepartition.dra.k8s.io/topology-rule: "true"`. They map driver-specific attributes to the coordinator's standard topology model and can add claim constraints.
+Topology rules are ConfigMaps labeled `nodepartition.dra.k8s.io/topology-rule: "true"`. They map driver-specific attributes to the coordinator's standard topology model and can add claim constraints. The coordinator only reads topology-rule and device-grouping ConfigMaps in its own namespace (`--config-namespace`, default the Helm release namespace), because they control the DeviceClasses it publishes. Set `controller.configNamespace` to use a different namespace, or `controller.watchAllNamespaces=true` to trust every namespace, which lets anyone who can create a labeled ConfigMap publish DeviceClasses.
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mock-accel-numa-rule
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/topology-rule: "true"
 data:
@@ -176,6 +177,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gpu-nic-pair
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/device-grouping: "true"
 data:

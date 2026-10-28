@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	resourceclient "k8s.io/client-go/kubernetes/typed/resource/v1"
@@ -546,4 +547,44 @@ func TestMergeGroupings_UserOnly(t *testing.T) {
 	}
 	merged := mergeGroupings(nil, user)
 	assert.Len(t, merged, 1)
+}
+
+func TestStartCache_ConfigNamespaceRestrictsConfigMaps(t *testing.T) {
+	ruleData := map[string]string{
+		"attribute":   "gpu.example.com/numaNode",
+		"type":        "int",
+		"driver":      "gpu.example.com",
+		"constraint":  "match",
+		"deviceClass": "gpu.example.com",
+	}
+	newObjects := func() []runtime.Object {
+		own := makeGroupingConfigMap("own", validGroupingData("own"))
+		own.Namespace = "coordinator"
+		other := makeGroupingConfigMap("other", validGroupingData("other"))
+		other.Namespace = "attacker"
+		ownRule := makeTopologyRuleConfigMap("own-rule", "coordinator", ruleData)
+		otherRule := makeTopologyRuleConfigMap("other-rule", "attacker", ruleData)
+		return []runtime.Object{own, other, ownRule, otherRule}
+	}
+
+	tests := []struct {
+		name          string
+		ns            string
+		wantGroupings int
+		wantRules     int
+	}{
+		{"restricted to own namespace", "coordinator", 1, 1},
+		{"all namespaces", "", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := NewController(k8sfake.NewSimpleClientset(newObjects()...), CoordinatorDriverName, PartitionModeGroupings)
+			ctrl.SetConfigNamespace(tt.ns)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			require.NoError(t, ctrl.StartCache(ctx))
+			assert.Len(t, ctrl.groupingStore.GetGroupings(), tt.wantGroupings)
+			assert.Len(t, ctrl.ruleStore.GetRules(), tt.wantRules)
+		})
+	}
 }

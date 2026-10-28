@@ -18,7 +18,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mock-accel-numa-rule
-  namespace: default
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/topology-rule: "true"
 data:
@@ -33,7 +33,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mock-accel-pci-rule
-  namespace: default
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/topology-rule: "true"
 data:
@@ -50,7 +50,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cpu-numa-rule
-  namespace: default
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/topology-rule: "true"
 data:
@@ -65,7 +65,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cpu-socket-rule
-  namespace: default
+  namespace: nodepartition
   labels:
     nodepartition.dra.k8s.io/topology-rule: "true"
 data:
