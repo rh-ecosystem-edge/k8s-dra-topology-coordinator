@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,27 @@ import (
 	klog "k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 )
+
+// OpaqueConfig is driver-specific configuration copied into an expanded
+// ResourceClaim. Parameters are kept as raw JSON so the coordinator does not
+// interpret or rewrite a driver's contract.
+type OpaqueConfig struct {
+	Driver     string          `json:"driver"`
+	Parameters json.RawMessage `json:"parameters"`
+}
+
+// validate checks the fields a driver contract needs: a driver name and
+// parameters that form a JSON object.
+func (o *OpaqueConfig) validate() error {
+	if o.Driver == "" {
+		return fmt.Errorf("opaque config missing driver")
+	}
+	var params map[string]json.RawMessage
+	if len(o.Parameters) == 0 || json.Unmarshal(o.Parameters, &params) != nil || params == nil {
+		return fmt.Errorf("opaque config parameters must be a JSON object")
+	}
+	return nil
+}
 
 // DeviceGroupingLabel identifies ConfigMaps containing device grouping definitions.
 const DeviceGroupingLabel = "nodepartition.dra.k8s.io/device-grouping"
@@ -27,10 +49,16 @@ const (
 
 // GroupingDevice specifies a device class and count within a grouping.
 type GroupingDevice struct {
-	Class       string            `json:"class"`
-	Count       int               `json:"count"`
-	Capacity    map[string]string `json:"capacity,omitempty"`
-	Passthrough bool              `json:"passthrough,omitempty"`
+	// Class identifies the topology class used to match discovered devices.
+	Class string `json:"class"`
+	// RequestClass optionally selects a different driver-owned DeviceClass in
+	// the generated claim (for example, dra.nvme-vfio instead of dra.nvme).
+	RequestClass string            `json:"requestClass,omitempty"`
+	Count        int               `json:"count"`
+	Capacity     map[string]string `json:"capacity,omitempty"`
+	Passthrough  bool              `json:"passthrough,omitempty"`
+	Selectors    []string          `json:"selectors,omitempty"`
+	Opaque       *OpaqueConfig     `json:"opaque,omitempty"`
 }
 
 // IntentMetadata adds optional human-readable metadata to a device grouping.
@@ -129,11 +157,23 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 	for _, g := range s.groupings {
 		devicesCopy := make([]GroupingDevice, len(g.Devices))
 		for i, d := range g.Devices {
-			gd := GroupingDevice{Class: d.Class, Count: d.Count, Passthrough: d.Passthrough}
+			gd := GroupingDevice{
+				Class:        d.Class,
+				RequestClass: d.RequestClass,
+				Count:        d.Count,
+				Passthrough:  d.Passthrough,
+				Selectors:    append([]string(nil), d.Selectors...),
+			}
 			if d.Capacity != nil {
 				gd.Capacity = make(map[string]string, len(d.Capacity))
 				for k, v := range d.Capacity {
 					gd.Capacity[k] = v
+				}
+			}
+			if d.Opaque != nil {
+				gd.Opaque = &OpaqueConfig{
+					Driver:     d.Opaque.Driver,
+					Parameters: append(json.RawMessage(nil), d.Opaque.Parameters...),
 				}
 			}
 			devicesCopy[i] = gd
@@ -257,12 +297,40 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		return g, fmt.Errorf("devices list cannot be empty")
 	}
 
+	seenClasses := make(map[string]struct{}, len(devices))
+	seenRequestClasses := make(map[string]struct{}, len(devices))
 	for i, d := range devices {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
 		}
+		if _, exists := seenClasses[d.Class]; exists {
+			return g, fmt.Errorf("device[%d] has duplicate class %q", i, d.Class)
+		}
+		seenClasses[d.Class] = struct{}{}
+		requestClass := d.RequestClass
+		if requestClass == "" {
+			requestClass = d.Class
+		}
+		if _, exists := seenRequestClasses[requestClass]; exists {
+			return g, fmt.Errorf("device[%d] has duplicate requestClass %q", i, requestClass)
+		}
+		seenRequestClasses[requestClass] = struct{}{}
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
+		}
+		if d.Opaque != nil {
+			if err := d.Opaque.validate(); err != nil {
+				return g, fmt.Errorf("device[%d] %w", i, err)
+			}
+			if g.Mode != OfferingModePassthrough || !d.Passthrough {
+				return g, fmt.Errorf("device[%d] opaque config requires passthrough mode and passthrough=true", i)
+			}
+		}
+		// Without a mode-specific requestClass, selectors or opaque config nothing tells
+		// the driver to bind the device for passthrough; the coordinator no
+		// longer guesses, so such an offering would allocate in container mode.
+		if g.Mode == OfferingModePassthrough && d.Passthrough && d.RequestClass == "" && len(d.Selectors) == 0 && d.Opaque == nil {
+			return g, fmt.Errorf("device[%d] passthrough requires requestClass, selectors, or opaque config", i)
 		}
 	}
 	if g.Rail {

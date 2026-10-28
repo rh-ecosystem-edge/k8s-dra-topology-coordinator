@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
@@ -127,6 +128,113 @@ func TestDeviceClassManager_SyncDeviceClasses(t *testing.T) {
 		assert.Equal(t, "true", dc.Labels[CoordinatorDriverName+"/managed"])
 		assert.NotEmpty(t, dc.Labels[CoordinatorDriverName+"/partitionType"])
 	}
+}
+
+func TestDeviceClassManager_BuildGroupingConfigUsesExplicitRequestContract(t *testing.T) {
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, NewTopologyRuleStore())
+	instance := GroupingInstance{
+		Mode:           OfferingModePassthrough,
+		DeviceCounts:   map[string]int{"gpu.nvidia.com": 1},
+		RequestClasses: map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
+		RequestSelectors: map[string][]string{
+			"gpu.nvidia.com": {`device.attributes["gpu.nvidia.com"].type == "vfio"`},
+		},
+		RequestOpaque: map[string]*OpaqueConfig{
+			"gpu.nvidia.com": {
+				Driver:     "gpu.nvidia.com",
+				Parameters: []byte(`{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`),
+			},
+		},
+		PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+	}
+
+	config := manager.buildGroupingConfig(instance)
+	require.Len(t, config.SubResources, 1)
+	subResource := config.SubResources[0]
+	assert.Equal(t, "gpu.nvidia.com", subResource.SourceDriver)
+	assert.Equal(t, "vfio.gpu.nvidia.com", subResource.DeviceClass)
+	assert.Equal(t, []string{`device.attributes["gpu.nvidia.com"].type == "vfio"`}, subResource.Selectors)
+	assert.True(t, subResource.Passthrough)
+	require.NotNil(t, subResource.Opaque)
+	assert.Equal(t, "gpu.nvidia.com", subResource.Opaque.Driver)
+	assert.JSONEq(t, `{"apiVersion":"gpu.nvidia.com/v1","kind":"VfioDeviceConfig"}`, string(subResource.Opaque.Parameters))
+}
+
+func TestDeviceClassManager_RejectsConflictingAggregateContracts(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	results := []GroupingResult{{
+		NodeName: "node-1",
+		Instances: []GroupingInstance{
+			{
+				GroupingName:  "healthy",
+				Alignment:     "pcieRoot",
+				InstanceIndex: 0,
+				PCIeRoots:     []string{"pci-9"},
+				DeviceCounts:  map[string]int{"gpu.nvidia.com": 1},
+			},
+			{
+				GroupingName:       "gpu-vfio",
+				Alignment:          "pcieRoot",
+				InstanceIndex:      0,
+				Mode:               OfferingModePassthrough,
+				PCIeRoots:          []string{"pci-0"},
+				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
+				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+				RequestClasses:     map[string]string{"gpu.nvidia.com": "vfio.gpu.nvidia.com"},
+			},
+			{
+				GroupingName:       "gpu-vfio",
+				Alignment:          "pcieRoot",
+				InstanceIndex:      1,
+				Mode:               OfferingModePassthrough,
+				PCIeRoots:          []string{"pci-1"},
+				DeviceCounts:       map[string]int{"gpu.nvidia.com": 1},
+				PassthroughClasses: map[string]bool{"gpu.nvidia.com": true},
+				RequestClasses:     map[string]string{"gpu.nvidia.com": "gpu.nvidia.com"},
+			},
+		},
+	}}
+
+	err := manager.SyncGroupingDeviceClasses(context.Background(), results)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicting explicit request contract")
+
+	// The conflicting grouping is skipped; the healthy one still publishes.
+	_, getErr := client.ResourceV1().DeviceClasses().Get(context.Background(), "healthy", metav1.GetOptions{})
+	assert.NoError(t, getErr)
+	_, getErr = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-vfio", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestDeviceClassManager_OverrideUsesEffectiveClassesInAlignments(t *testing.T) {
+	rules := NewTopologyRuleStore()
+	require.NoError(t, rules.LoadFromConfigMap(makeTopologyRuleConfigMap("gpu-vfio", "default", map[string]string{
+		"attribute":   "gpu.amd.com/numaNode",
+		"type":        "int",
+		"driver":      "gpu.amd.com",
+		"constraint":  "match",
+		"deviceClass": "vfio.gpu.amd.com",
+	})))
+	manager := NewDeviceClassManager(fake.NewSimpleClientset(), CoordinatorDriverName, rules)
+	config, _ := manager.buildPartitionConfig(PartitionPCIeRoot, PartitionDevice{
+		DeviceCounts: map[string]int{
+			"gpu.amd.com":       1,
+			"rdma.mellanox.com": 1,
+		},
+	})
+
+	var found bool
+	for _, alignment := range config.Alignments {
+		for _, request := range alignment.Requests {
+			if request == "vfio.gpu.amd.com" {
+				found = true
+			}
+			assert.NotEqual(t, "gpu.amd.com", request)
+		}
+	}
+	assert.True(t, found, "alignment should reference the effective overridden DeviceClass")
+	require.NoError(t, config.Validate())
 }
 
 func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testing.T) {

@@ -3,6 +3,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	klog "k8s.io/klog/v2"
 
@@ -193,9 +195,11 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 
 	var expandedRequests []resourcev1.DeviceRequest
 	var constraints []resourcev1.DeviceConstraint
+	var explicitConfigs []resourcev1.DeviceClaimConfiguration
 	anyExpanded := false
 	expansionMap := make(map[string][]string) // original request name → expanded request names
-	passthroughDrivers := make(map[string]bool)
+	// original request name → alignment attribute → expanded names that publish it
+	alignedMap := make(map[string]map[string][]string)
 
 	for _, req := range requests {
 		if req.Exactly == nil {
@@ -217,18 +221,11 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			expandedRequests = append(expandedRequests, req)
 			continue
 		}
-		if partitionConfig.Mode == controller.OfferingModePassthrough {
-			for _, sr := range partitionConfig.SubResources {
-				if sr.Passthrough {
-					passthroughDrivers[sr.DeviceClass] = true
-				}
-			}
-		}
-
 		// Expand this request into sub-resource requests
-		subRequests, subConstraints := ce.expandRequest(req, partitionConfig)
+		subRequests, subConstraints, subConfigs := ce.expandRequest(req, partitionConfig)
 		expandedRequests = append(expandedRequests, subRequests...)
 		constraints = append(constraints, subConstraints...)
+		explicitConfigs = append(explicitConfigs, subConfigs...)
 		anyExpanded = true
 
 		// Track the expansion mapping for Pod rewriting
@@ -237,13 +234,19 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			expandedNames = append(expandedNames, sr.Name)
 		}
 		expansionMap[req.Name] = expandedNames
+		alignedMap[req.Name] = alignedRequests(subRequests, partitionConfig)
 	}
 
 	if !anyExpanded {
 		return nil, nil
 	}
+	if err := validateExpandedRequestNames(expandedRequests); err != nil {
+		return nil, &managedExpansionError{err: err}
+	}
 
 	var patches []jsonPatch
+	remappedConstraints, constraintsChanged := remapConstraints(claim.Spec.Devices.Constraints, expansionMap, alignedMap)
+	remappedConfigs, configsChanged := remapConfigs(claim.Spec.Devices.Config, expansionMap)
 
 	// Replace requests
 	patches = append(patches, jsonPatch{
@@ -253,65 +256,62 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 	})
 
 	// Add or replace constraints
-	if len(constraints) > 0 {
+	allConstraints := append(remappedConstraints, constraints...)
+	if len(allConstraints) > 0 && (constraintsChanged || len(constraints) > 0) {
 		if len(claim.Spec.Devices.Constraints) == 0 {
 			patches = append(patches, jsonPatch{
 				Op:    "add",
 				Path:  "/spec/devices/constraints",
-				Value: constraints,
+				Value: allConstraints,
 			})
 		} else {
-			merged := make([]resourcev1.DeviceConstraint, 0, len(claim.Spec.Devices.Constraints)+len(constraints))
-			merged = append(merged, claim.Spec.Devices.Constraints...)
-			merged = append(merged, constraints...)
 			patches = append(patches, jsonPatch{
 				Op:    "replace",
 				Path:  "/spec/devices/constraints",
-				Value: merged,
+				Value: allConstraints,
 			})
 		}
 	}
 
-	// Inject VFIO opaque configs for passthrough drivers that don't already
-	// have a config. This tells DRA drivers to bind devices to vfio-pci
-	// during Prepare — needed for KubeVirt VM passthrough.
-	existingConfigDrivers := make(map[string]bool)
-	for _, cfg := range claim.Spec.Devices.Config {
-		if cfg.Opaque != nil {
-			existingConfigDrivers[cfg.Opaque.Driver] = true
+	// Copy only explicitly declared driver configurations. The coordinator
+	// does not infer VFIO behavior from a class or driver name.
+	configsToAdd := make([]resourcev1.DeviceClaimConfiguration, 0, len(explicitConfigs))
+	if len(explicitConfigs) > 0 {
+		sort.SliceStable(explicitConfigs, func(i, j int) bool {
+			return deviceConfigKey(explicitConfigs[i]) < deviceConfigKey(explicitConfigs[j])
+		})
+		for _, cfg := range explicitConfigs {
+			existingConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), remappedConfigs...), configsToAdd...)
+			if deviceConfigCovered(existingConfigs, cfg) {
+				continue
+			}
+			configsToAdd = append(configsToAdd, cfg)
+		}
+		if len(configsToAdd) > 0 {
+			// Generated configs go first: later entries win in DRA, and a
+			// user's own config for the same request must take precedence.
+			allConfigs := append(append([]resourcev1.DeviceClaimConfiguration(nil), configsToAdd...), remappedConfigs...)
+			if len(claim.Spec.Devices.Config) == 0 {
+				patches = append(patches, jsonPatch{
+					Op:    "add",
+					Path:  "/spec/devices/config",
+					Value: allConfigs,
+				})
+			} else {
+				patches = append(patches, jsonPatch{
+					Op:    "replace",
+					Path:  "/spec/devices/config",
+					Value: allConfigs,
+				})
+			}
 		}
 	}
-	var vfioConfigs []resourcev1.DeviceClaimConfiguration
-	passthroughDriverNames := make([]string, 0, len(passthroughDrivers))
-	for driver := range passthroughDrivers {
-		passthroughDriverNames = append(passthroughDriverNames, driver)
-	}
-	sort.Strings(passthroughDriverNames)
-	for _, driver := range passthroughDriverNames {
-		if existingConfigDrivers[driver] {
-			continue
-		}
-		vfioConfig := ce.buildVfioConfig(driver)
-		if vfioConfig != nil {
-			vfioConfigs = append(vfioConfigs, *vfioConfig)
-			existingConfigDrivers[driver] = true
-		}
-	}
-	if len(vfioConfigs) > 0 {
-		allConfigs := append(claim.Spec.Devices.Config, vfioConfigs...)
-		if len(claim.Spec.Devices.Config) == 0 {
-			patches = append(patches, jsonPatch{
-				Op:    "add",
-				Path:  "/spec/devices/config",
-				Value: allConfigs,
-			})
-		} else {
-			patches = append(patches, jsonPatch{
-				Op:    "replace",
-				Path:  "/spec/devices/config",
-				Value: allConfigs,
-			})
-		}
+	if configsChanged && len(configsToAdd) == 0 {
+		patches = append(patches, jsonPatch{
+			Op:    "replace",
+			Path:  "/spec/devices/config",
+			Value: remappedConfigs,
+		})
 	}
 
 	// Annotate the claim with the expansion mapping so the Pod webhook
@@ -348,7 +348,7 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 // expandRequest expands a partition DeviceRequest into sub-resource requests.
 // When req.Exactly.Count > 1, creates N independent partition instances, each
 // with its own set of sub-requests and alignment constraints.
-func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint) {
+func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint, []resourcev1.DeviceClaimConfiguration) {
 	count := int64(1)
 	if req.Exactly != nil && req.Exactly.Count > 1 {
 		count = req.Exactly.Count
@@ -356,18 +356,20 @@ func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *con
 
 	var allSubRequests []resourcev1.DeviceRequest
 	var allConstraints []resourcev1.DeviceConstraint
+	var allConfigs []resourcev1.DeviceClaimConfiguration
 
 	for i := int64(0); i < count; i++ {
 		prefix := req.Name
 		if count > 1 {
 			prefix = fmt.Sprintf("%s-%d", req.Name, i)
 		}
-		subRequests, constraints := ce.expandSinglePartition(prefix, req, config)
+		subRequests, constraints, configs := ce.expandSinglePartition(prefix, req, config)
 		allSubRequests = append(allSubRequests, subRequests...)
 		allConstraints = append(allConstraints, constraints...)
+		allConfigs = append(allConfigs, configs...)
 	}
 
-	return allSubRequests, allConstraints
+	return allSubRequests, allConstraints, allConfigs
 }
 
 // expandSinglePartition expands one partition instance into sub-resource requests
@@ -379,14 +381,16 @@ func (ce *ClaimExpander) expandRequest(req resourcev1.DeviceRequest, config *con
 // keep their original count since they use consumable capacity, not PCI passthrough.
 // The alignment constraints tie all split requests together so the scheduler
 // places them on the same NUMA/pcieRoot.
-func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint) {
+func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.DeviceRequest, config *controller.PartitionConfig) ([]resourcev1.DeviceRequest, []resourcev1.DeviceConstraint, []resourcev1.DeviceClaimConfiguration) {
 	var subRequests []resourcev1.DeviceRequest
 	var constraints []resourcev1.DeviceConstraint
+	var explicitConfigs []resourcev1.DeviceClaimConfiguration
 
 	requestNameMap := make(map[string][]string)
 
 	for _, sr := range config.SubResources {
 		sanitized := sanitizeDeviceClassName(sr.DeviceClass)
+		var requestNames []string
 
 		splitCount := 1
 		deviceCount := sr.Count
@@ -403,6 +407,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 				name = prefix + "-" + sanitized
 			}
 			requestNameMap[sr.DeviceClass] = append(requestNameMap[sr.DeviceClass], name)
+			requestNames = append(requestNames, name)
 
 			exact := &resourcev1.ExactDeviceRequest{
 				DeviceClassName: sr.DeviceClass,
@@ -441,12 +446,28 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 				Exactly: exact,
 			})
 		}
+
+		if config.Mode == controller.OfferingModePassthrough && sr.Passthrough && sr.Opaque != nil {
+			explicitConfigs = append(explicitConfigs, resourcev1.DeviceClaimConfiguration{
+				Requests: requestNames,
+				DeviceConfiguration: resourcev1.DeviceConfiguration{
+					Opaque: &resourcev1.OpaqueDeviceConfiguration{
+						Driver:     sr.Opaque.Driver,
+						Parameters: runtime.RawExtension{Raw: append([]byte(nil), sr.Opaque.Parameters...)},
+					},
+				},
+			})
+		}
 	}
 
 	// Build driver counts map for satisfiability checks
 	driverCounts := make(map[string]int, len(config.SubResources))
 	for _, sr := range config.SubResources {
-		driverCounts[sr.DeviceClass] = sr.Count
+		driver := sr.SourceDriver
+		if driver == "" {
+			driver = sr.DeviceClass
+		}
+		driverCounts[driver] = sr.Count
 	}
 
 	// Build constraints from alignments.
@@ -551,7 +572,101 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 		}
 	}
 
-	return subRequests, constraints
+	return subRequests, constraints, explicitConfigs
+}
+
+func validateExpandedRequestNames(requests []resourcev1.DeviceRequest) error {
+	seen := make(map[string]struct{}, len(requests))
+	for _, request := range requests {
+		if _, exists := seen[request.Name]; exists {
+			return fmt.Errorf("expanded request name %q is duplicated", request.Name)
+		}
+		if problems := validation.IsDNS1123Label(request.Name); len(problems) > 0 {
+			return fmt.Errorf("expanded request name %q is invalid: %s", request.Name, strings.Join(problems, "; "))
+		}
+		seen[request.Name] = struct{}{}
+	}
+	return nil
+}
+
+// alignedRequests maps each alignment attribute of config to the expanded
+// request names whose device class takes part in that alignment.
+func alignedRequests(subRequests []resourcev1.DeviceRequest, config *controller.PartitionConfig) map[string][]string {
+	aligned := make(map[string][]string, len(config.Alignments))
+	for _, alignment := range config.Alignments {
+		for _, sub := range subRequests {
+			if sub.Exactly == nil {
+				continue
+			}
+			class := sub.Exactly.DeviceClassName
+			for _, reqName := range alignment.Requests {
+				if reqName == class || reqName == sanitizeDeviceClassName(class) {
+					aligned[alignment.Attribute] = append(aligned[alignment.Attribute], sub.Name)
+					break
+				}
+			}
+		}
+	}
+	return aligned
+}
+
+// remapConstraints rewrites constraint request references to the expanded
+// request names. A matchAttribute constraint that targets an alignment
+// attribute is narrowed to the sub-requests that publish it; spreading it to
+// e.g. CPU or memory requests would make the claim unsatisfiable.
+func remapConstraints(constraints []resourcev1.DeviceConstraint, mapping map[string][]string, aligned map[string]map[string][]string) ([]resourcev1.DeviceConstraint, bool) {
+	if len(constraints) == 0 {
+		return nil, false
+	}
+	remapped := make([]resourcev1.DeviceConstraint, 0, len(constraints))
+	changed := false
+	for _, constraint := range constraints {
+		copyConstraint := constraint
+		copyConstraint.Requests = nil
+		for _, request := range constraint.Requests {
+			expanded, ok := mapping[request]
+			if !ok {
+				copyConstraint.Requests = append(copyConstraint.Requests, request)
+				continue
+			}
+			if constraint.MatchAttribute != nil {
+				if narrowed := aligned[request][string(*constraint.MatchAttribute)]; len(narrowed) > 0 {
+					expanded = narrowed
+				}
+			}
+			copyConstraint.Requests = append(copyConstraint.Requests, expanded...)
+			changed = true
+		}
+		remapped = append(remapped, copyConstraint)
+	}
+	return remapped, changed
+}
+
+func remapConfigs(configs []resourcev1.DeviceClaimConfiguration, mapping map[string][]string) ([]resourcev1.DeviceClaimConfiguration, bool) {
+	if len(configs) == 0 {
+		return nil, false
+	}
+	remapped := make([]resourcev1.DeviceClaimConfiguration, 0, len(configs))
+	changed := false
+	for _, config := range configs {
+		copyConfig := config
+		copyConfig.Requests = nil
+		if len(config.Requests) == 0 {
+			remapped = append(remapped, copyConfig)
+			continue
+		}
+		for _, request := range config.Requests {
+			expanded, ok := mapping[request]
+			if !ok {
+				copyConfig.Requests = append(copyConfig.Requests, request)
+				continue
+			}
+			copyConfig.Requests = append(copyConfig.Requests, expanded...)
+			changed = true
+		}
+		remapped = append(remapped, copyConfig)
+	}
+	return remapped, changed
 }
 
 // getPartitionConfig looks up a DeviceClass and extracts the PartitionConfig
@@ -593,6 +708,12 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 		if partConfig.Kind != "PartitionConfig" {
 			if managed {
 				return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q does not contain a PartitionConfig", deviceClassName)}
+			}
+			continue
+		}
+		if err := partConfig.Validate(); err != nil {
+			if managed {
+				return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has invalid PartitionConfig: %w", deviceClassName, err)}
 			}
 			continue
 		}
@@ -770,7 +891,7 @@ func (ce *ClaimExpander) expansionMapping(ctx context.Context, requests []resour
 		if config == nil {
 			continue
 		}
-		subRequests, _ := ce.expandRequest(req, config)
+		subRequests, _, _ := ce.expandRequest(req, config)
 		for _, subRequest := range subRequests {
 			mapping[req.Name] = append(mapping[req.Name], subRequest.Name)
 		}
@@ -1126,36 +1247,72 @@ func escapeJSONPointer(s string) string {
 	return s
 }
 
-// buildVfioConfig returns the driver-specific opaque config that tells a DRA
-// driver to bind a device to vfio-pci during Prepare. Returns nil for unknown
-// drivers. The VMI webhook uses this to inject VFIO configs into claim templates
-// so users don't need to know driver-specific config formats.
-func (ce *ClaimExpander) buildVfioConfig(driver string) *resourcev1.DeviceClaimConfiguration {
-	lc := strings.ToLower(driver)
+func deviceConfigKey(config resourcev1.DeviceClaimConfiguration) string {
+	if config.Opaque == nil {
+		return ""
+	}
+	requests := append([]string(nil), config.Requests...)
+	sort.Strings(requests)
+	return strings.Join([]string{
+		config.Opaque.Driver,
+		canonicalJSON(config.Opaque.Parameters.Raw),
+		strings.Join(requests, ","),
+	}, "|")
+}
 
-	if strings.Contains(lc, "sriov") || strings.Contains(lc, "net") || strings.Contains(lc, "rdma") {
-		return &resourcev1.DeviceClaimConfiguration{
-			DeviceConfiguration: resourcev1.DeviceConfiguration{
-				Opaque: &resourcev1.OpaqueDeviceConfiguration{
-					Driver:     driver,
-					Parameters: runtime.RawExtension{Raw: []byte(`{"apiVersion":"sriovnetwork.k8snetworkplumbingwg.io/v1alpha1","kind":"VfConfig","driver":"vfio-pci"}`)},
-				},
-			},
+func deviceConfigCovered(existing []resourcev1.DeviceClaimConfiguration, candidate resourcev1.DeviceClaimConfiguration) bool {
+	if candidate.Opaque == nil {
+		return false
+	}
+	candidateRequests := requestSet(candidate.Requests)
+	for _, current := range existing {
+		if current.Opaque == nil || current.Opaque.Driver != candidate.Opaque.Driver {
+			continue
+		}
+		if canonicalJSON(current.Opaque.Parameters.Raw) != canonicalJSON(candidate.Opaque.Parameters.Raw) {
+			continue
+		}
+		if len(current.Requests) == 0 {
+			return true
+		}
+		if len(candidateRequests) == 0 {
+			continue
+		}
+		currentRequests := requestSet(current.Requests)
+		covered := true
+		for request := range candidateRequests {
+			if !currentRequests[request] {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			return true
 		}
 	}
+	return false
+}
 
-	if strings.Contains(lc, "gpu") && (strings.Contains(lc, "amd") || strings.Contains(lc, "1002")) {
-		return &resourcev1.DeviceClaimConfiguration{
-			DeviceConfiguration: resourcev1.DeviceConfiguration{
-				Opaque: &resourcev1.OpaqueDeviceConfiguration{
-					Driver:     driver,
-					Parameters: runtime.RawExtension{Raw: []byte(`{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`)},
-				},
-			},
-		}
+func requestSet(requests []string) map[string]bool {
+	set := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		set[request] = true
 	}
+	return set
+}
 
-	return nil
+func canonicalJSON(raw []byte) string {
+	var value interface{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return string(raw)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return string(raw)
+	}
+	return string(data)
 }
 
 // allowResponse returns an admission response that allows the request without mutation.

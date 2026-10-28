@@ -180,7 +180,7 @@ Apply valid grouping ConfigMaps for:
 | --- | --- | --- |
 | GRP-01 | Create a valid grouping | Aggregate and per-rail classes appear with expected alignment, fallback, counts, and selectors |
 | GRP-02 | Use `mode: container` with GPU/NIC-looking class names | Generated `PartitionConfig` has no passthrough device flags and ordinary Pod claims receive no VFIO config |
-| GRP-03 | Use `mode: passthrough` but mark only the NIC entry `passthrough: true` | Only the NIC driver receives the VFIO opaque config; GPU remains a normal request |
+| GRP-03 | Use `mode: passthrough` with an explicit opaque config on only the NIC entry | Only the NIC request receives the declared opaque config; the GPU remains a normal request |
 | GRP-04 | Update display name, description, intent, categories, workload types, and visibility | Aggregate class labels/annotations update; per-rail classes remain semantically unchanged |
 | GRP-05 | Submit malformed YAML, zero/negative counts, unknown mode, overlong metadata, or missing class | Invalid update is rejected and the last valid cached grouping remains published |
 | GRP-06 | Create sanitized-name and aggregate/per-rail name collisions | Publication pauses for the conflicting set and resumes after correction; existing valid output is retained |
@@ -200,10 +200,10 @@ AdmissionReview response plus the stored object.
 | ADM-04 | Claim a managed class with malformed/missing `PartitionConfig` | Admission fails closed with a useful error |
 | ADM-05 | Submit the same claim through CREATE and UPDATE | Expansion is idempotent; requests and constraints are not duplicated |
 | ADM-06 | Submit a container grouping that contains a NIC/RDMA-looking class | No VFIO config is injected |
-| ADM-07 | Submit an explicit passthrough grouping | VFIO config is injected only for the explicitly marked passthrough driver |
+| ADM-07 | Submit an explicit passthrough grouping | Only explicitly declared opaque config is copied to the matching passthrough request; no driver-name heuristic runs |
 | ADM-08 | Use a count greater than one | Expanded request naming and count are correct for container resources; passthrough resources are split into unique requests as designed |
 | ADM-09a | Create a managed DeviceClass with missing/malformed opaque config | Managed catalog claim is denied; ordinary native claim still passes through |
-| ADM-09b | Use an explicit API fault mechanism (proxy or temporary RBAC denial) during DeviceClass lookup | Managed catalog claim is denied; ordinary native claim still passes through; the fault is removed before cleanup |
+| ADM-09b | Use an explicit API fault mechanism (proxy or temporary RBAC denial) during DeviceClass lookup | Admission fails closed because ownership cannot be established; the fault is removed before cleanup |
 
 ADM-06 through ADM-09b are the regression tests for the review findings about
 implicit passthrough and fail-open admission.
@@ -318,7 +318,7 @@ The run passes only when:
 2. no managed claim is admitted without complete expansion;
 3. native claims remain unmodified;
 4. container offerings never receive implicit VFIO configuration;
-5. explicit passthrough offerings inject VFIO only for marked devices;
+5. explicit passthrough offerings copy only their declared driver configuration;
 6. template-backed Pod and VMI references are proven with generated claim
    names;
 7. custom driver-name and two-replica determinism tests pass;

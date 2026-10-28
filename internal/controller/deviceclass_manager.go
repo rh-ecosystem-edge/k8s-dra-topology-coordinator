@@ -53,8 +53,11 @@ type PartitionConfig struct {
 
 // SubResourceConfig defines a sub-resource that a partition contains.
 type SubResourceConfig struct {
-	DeviceClass string `json:"deviceClass"`
-	Count       int    `json:"count"`
+	// SourceDriver identifies the driver used for topology satisfiability checks.
+	// It may differ from DeviceClass when a mode-specific class is requested.
+	SourceDriver string `json:"sourceDriver,omitempty"`
+	DeviceClass  string `json:"deviceClass"`
+	Count        int    `json:"count"`
 	// Passthrough marks this subresource for VM passthrough handling when the
 	// enclosing offering is in passthrough mode.
 	Passthrough bool `json:"passthrough,omitempty"`
@@ -72,6 +75,59 @@ type SubResourceConfig struct {
 	// When set, the webhook adds a CEL selector to filter by partition type
 	// (e.g., "SPX" for full GPU, "DPX" for half, "CPX" for eighth).
 	PartitionMode string `json:"partitionMode,omitempty"`
+	// Opaque is an explicit driver-owned configuration copied to the matching
+	// expanded request. The coordinator does not interpret its parameters.
+	Opaque *OpaqueConfig `json:"opaque,omitempty"`
+}
+
+// Validate checks the coordinator-owned portions of a partition contract.
+// Driver-specific opaque parameters are intentionally not interpreted here.
+func (c *PartitionConfig) Validate() error {
+	if c == nil {
+		return fmt.Errorf("partition config is nil")
+	}
+	if c.Kind != "PartitionConfig" {
+		return fmt.Errorf("kind must be PartitionConfig")
+	}
+	if c.Mode != "" && c.Mode != OfferingModeContainer && c.Mode != OfferingModePassthrough {
+		return fmt.Errorf("invalid mode %q", c.Mode)
+	}
+	if len(c.SubResources) == 0 {
+		return fmt.Errorf("subResources must not be empty")
+	}
+	seenClasses := make(map[string]struct{}, len(c.SubResources))
+	for i, sr := range c.SubResources {
+		if sr.DeviceClass == "" {
+			return fmt.Errorf("subResources[%d] missing deviceClass", i)
+		}
+		if _, exists := seenClasses[sr.DeviceClass]; exists {
+			return fmt.Errorf("subResources[%d] has duplicate deviceClass %q", i, sr.DeviceClass)
+		}
+		seenClasses[sr.DeviceClass] = struct{}{}
+		if sr.Count < 1 {
+			return fmt.Errorf("subResources[%d] count must be positive", i)
+		}
+		if sr.Opaque == nil {
+			continue
+		}
+		if err := sr.Opaque.validate(); err != nil {
+			return fmt.Errorf("subResources[%d] %w", i, err)
+		}
+		if c.Mode != OfferingModePassthrough || !sr.Passthrough {
+			return fmt.Errorf("subResources[%d] opaque config requires passthrough mode and passthrough=true", i)
+		}
+	}
+	for i, alignment := range c.Alignments {
+		if alignment.Attribute == "" {
+			return fmt.Errorf("alignments[%d] missing attribute", i)
+		}
+		for _, request := range alignment.Requests {
+			if _, exists := seenClasses[request]; !exists {
+				return fmt.Errorf("alignments[%d] references unknown deviceClass %q", i, request)
+			}
+		}
+	}
+	return nil
 }
 
 // AlignmentConfig defines a matchAttribute constraint for the combined claim.
@@ -778,8 +834,9 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 	// per-driver CEL selectors for NUMA pinning, and partition mode if applicable.
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			DeviceClass: m.rules.GetDeviceClassForDriver(driver),
-			Count:       count,
+			SourceDriver: driver,
+			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
+			Count:        count,
 		}
 		if representative.DeviceCapacity != nil {
 			if cap, ok := representative.DeviceCapacity[driver]; ok {
@@ -873,7 +930,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 			}
 			for driver := range representative.DeviceCounts {
 				if driversWithScalarAttribute[baseDriverName(driver)] {
-					constraintRequests = append(constraintRequests, driver)
+					constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 				}
 			}
 			if len(constraintRequests) == 0 {
@@ -882,7 +939,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 		} else {
 			// No device data available — include all drivers
 			for driver := range representative.DeviceCounts {
-				constraintRequests = append(constraintRequests, driver)
+				constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 			}
 		}
 
@@ -935,8 +992,9 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 
 	for driver, count := range representative.DeviceCounts {
 		sr := SubResourceConfig{
-			DeviceClass: m.rules.GetDeviceClassForDriver(driver),
-			Count:       count,
+			SourceDriver: driver,
+			DeviceClass:  m.rules.GetDeviceClassForDriver(driver),
+			Count:        count,
 		}
 		if representative.DeviceCapacity != nil {
 			if cap, ok := representative.DeviceCapacity[driver]; ok {
@@ -971,7 +1029,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 			}
 			for driver := range representative.DeviceCounts {
 				if driversWithAttribute[baseDriverName(driver)] {
-					constraintRequests = append(constraintRequests, driver)
+					constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 				}
 			}
 			// Fall back to the fallback attribute if primary doesn't cover enough drivers
@@ -986,7 +1044,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 				constraintRequests = nil
 				for driver := range representative.DeviceCounts {
 					if driversWithAttribute[baseDriverName(driver)] {
-						constraintRequests = append(constraintRequests, driver)
+						constraintRequests = append(constraintRequests, m.rules.GetDeviceClassForDriver(driver))
 					}
 				}
 			}
@@ -1016,13 +1074,13 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 		// covering all drivers. This ensures devices like memory (which lack
 		// pcieRoot but have numaNode) are co-located with the rest.
 		if rule.FallbackAttribute != "" && constraintAttr != rule.FallbackAttribute {
-			coveredDrivers := make(map[string]bool)
+			coveredClasses := make(map[string]bool)
 			for _, r := range constraintRequests {
-				coveredDrivers[r] = true
+				coveredClasses[r] = true
 			}
 			uncoveredCount := 0
 			for driver := range representative.DeviceCounts {
-				if !coveredDrivers[driver] {
+				if !coveredClasses[m.rules.GetDeviceClassForDriver(driver)] {
 					uncoveredCount++
 				}
 			}
@@ -1036,7 +1094,7 @@ func (m *DeviceClassManager) buildPartitionAggregateConfig(representative Partit
 				var fallbackRequests []string
 				for driver := range representative.DeviceCounts {
 					if fallbackDrivers[baseDriverName(driver)] {
-						fallbackRequests = append(fallbackRequests, driver)
+						fallbackRequests = append(fallbackRequests, m.rules.GetDeviceClassForDriver(driver))
 					}
 				}
 				if len(fallbackRequests) > len(constraintRequests) {
@@ -1174,11 +1232,27 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		count          int
 	}
 
+	// A grouping whose instances disagree on the request contract (e.g. two
+	// ConfigMaps sharing a name) is skipped; it must not block other groupings.
+	var publishErrs []error
+	conflicted := make(map[string]struct{})
+	contracts := make(map[string]string)
 	seen := make(map[string]*groupingEntry)
 	for _, result := range results {
 		for _, inst := range result.Instances {
 			config := m.buildGroupingConfig(inst)
 			key := groupingInstanceKey(inst)
+
+			contract := groupingRequestContractKey(inst)
+			if prev, ok := contracts[inst.GroupingName]; !ok {
+				contracts[inst.GroupingName] = contract
+			} else if prev != contract {
+				if _, dup := conflicted[inst.GroupingName]; !dup {
+					conflicted[inst.GroupingName] = struct{}{}
+					publishErrs = append(publishErrs, fmt.Errorf("grouping %q has conflicting explicit request contract", inst.GroupingName))
+				}
+				continue
+			}
 
 			if entry, ok := seen[key]; ok {
 				entry.count++
@@ -1189,6 +1263,12 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 					count:          1,
 				}
 			}
+		}
+	}
+
+	for key, entry := range seen {
+		if _, bad := conflicted[entry.representative.GroupingName]; bad {
+			delete(seen, key)
 		}
 	}
 
@@ -1223,7 +1303,6 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// Emit per-instance DeviceClasses. Errors are
 	// accumulated rather than returned immediately so that one unpublishable
 	// grouping does not block every other grouping from reconciling.
-	var publishErrs []error
 	for key, entry := range seen {
 		dc := m.buildGroupingDeviceClass(key, entry.representative, entry.config, entry.count)
 		dc.Name = groupingDeviceClassName(entry.representative)
@@ -1251,6 +1330,10 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		alignment        string
 		mode             OfferingMode
 		passthrough      map[string]bool
+		requestClasses   map[string]string
+		requestSelectors map[string][]string
+		requestOpaque    map[string]*OpaqueConfig
+		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		acc              *deviceIntersectionState
 		minInstanceIndex int
@@ -1266,6 +1349,10 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				alignment:        entry.representative.Alignment,
 				mode:             entry.representative.Mode,
 				passthrough:      make(map[string]bool, len(entry.representative.PassthroughClasses)),
+				requestClasses:   cloneRequestClasses(entry.representative.RequestClasses),
+				requestSelectors: cloneRequestSelectors(entry.representative.RequestSelectors),
+				requestOpaque:    cloneRequestOpaque(entry.representative.RequestOpaque),
+				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				acc:              newDeviceIntersectionState(),
 				minInstanceIndex: entry.representative.InstanceIndex,
@@ -1274,6 +1361,10 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				state.passthrough[class] = enabled
 			}
 			aggStates[name] = state
+		} else if state.contractKey != groupingRequestContractKey(entry.representative) {
+			// Unreachable while the first pass drops conflicting groupings.
+			publishErrs = append(publishErrs, fmt.Errorf("grouping %q has conflicting explicit request contract", name))
+			continue
 		}
 		state.count += entry.count
 		if entry.representative.InstanceIndex < state.minInstanceIndex {
@@ -1289,6 +1380,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			Alignment:          state.alignment,
 			Mode:               state.mode,
 			PassthroughClasses: state.passthrough,
+			RequestClasses:     state.requestClasses,
+			RequestSelectors:   state.requestSelectors,
+			RequestOpaque:      state.requestOpaque,
 			Intent:             state.intent,
 			DeviceCounts:       intersectedCounts,
 			DeviceCapacity:     intersectedCap,
@@ -1348,6 +1442,28 @@ func groupingInstanceKey(inst GroupingInstance) string {
 	return key
 }
 
+func groupingRequestContractKey(inst GroupingInstance) string {
+	mode := inst.Mode
+	if mode == "" {
+		mode = OfferingModeContainer
+	}
+	contract := struct {
+		Mode        OfferingMode             `json:"mode,omitempty"`
+		Passthrough map[string]bool          `json:"passthrough,omitempty"`
+		Classes     map[string]string        `json:"classes,omitempty"`
+		Selectors   map[string][]string      `json:"selectors,omitempty"`
+		Opaque      map[string]*OpaqueConfig `json:"opaque,omitempty"`
+	}{
+		Mode:        mode,
+		Passthrough: inst.PassthroughClasses,
+		Classes:     inst.RequestClasses,
+		Selectors:   inst.RequestSelectors,
+		Opaque:      inst.RequestOpaque,
+	}
+	data, _ := json.Marshal(contract)
+	return string(data)
+}
+
 func groupingDeviceClassName(inst GroupingInstance) string {
 	base := sanitizeForName(inst.GroupingName)
 	if inst.Rail {
@@ -1404,10 +1520,25 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 	}
 
 	for driverClass, count := range inst.DeviceCounts {
+		requestClass := driverClass
+		if inst.RequestClasses != nil && inst.RequestClasses[driverClass] != "" {
+			requestClass = inst.RequestClasses[driverClass]
+		}
 		sr := SubResourceConfig{
-			DeviceClass: driverClass,
-			Count:       count,
-			Passthrough: config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
+			SourceDriver: m.driverForClass(driverClass),
+			DeviceClass:  requestClass,
+			Count:        count,
+			Passthrough:  config.Mode == OfferingModePassthrough && inst.PassthroughClasses[driverClass],
+		}
+		if inst.RequestSelectors != nil {
+			sr.Selectors = append(sr.Selectors, inst.RequestSelectors[driverClass]...)
+		}
+		if inst.RequestOpaque != nil && inst.RequestOpaque[driverClass] != nil {
+			opaque := inst.RequestOpaque[driverClass]
+			sr.Opaque = &OpaqueConfig{
+				Driver:     opaque.Driver,
+				Parameters: append([]byte(nil), opaque.Parameters...),
+			}
 		}
 
 		if cap, ok := inst.DeviceCapacity[driverClass]; ok {
@@ -1455,7 +1586,11 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			for driver := range inst.DeviceCounts {
 				rawDriver := m.driverForClass(driver)
 				if driversWithAttribute[baseDriverName(rawDriver)] {
-					constraintRequests = append(constraintRequests, driver)
+					requestClass := driver
+					if inst.RequestClasses != nil && inst.RequestClasses[driver] != "" {
+						requestClass = inst.RequestClasses[driver]
+					}
+					constraintRequests = append(constraintRequests, requestClass)
 				}
 			}
 		}
