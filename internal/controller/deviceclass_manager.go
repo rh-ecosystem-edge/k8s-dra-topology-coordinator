@@ -723,6 +723,20 @@ func countPCIeRootsInNUMA(partitions []PartitionDevice, profile string, numaNode
 	return count
 }
 
+// ownedByThisDriver reports whether dc carries opaque config for this
+// manager's driver. Cleanup skips classes that don't.
+// Limits: two releases with different --driver-name still collide on
+// same-named classes (they overwrite each other), and changing --driver-name
+// leaves the old driver's classes undeleted.
+func (m *DeviceClassManager) ownedByThisDriver(dc *resourcev1.DeviceClass) bool {
+	for _, c := range dc.Spec.Config {
+		if c.Opaque != nil && c.Opaque.Driver == m.driverName {
+			return true
+		}
+	}
+	return false
+}
+
 // cleanupStaleDeviceClasses removes DeviceClasses that no longer match any partition.
 func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, activeKeys, activeNames map[string]bool) error {
 	labelSelector := fmt.Sprintf("%s/managed=true,%s/partitionType", CoordinatorDriverName, CoordinatorDriverName)
@@ -734,6 +748,9 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 	}
 
 	for _, dc := range classes.Items {
+		if !m.ownedByThisDriver(&dc) {
+			continue
+		}
 		if activeNames[dc.Name] {
 			continue
 		}
@@ -1719,6 +1736,9 @@ func (m *DeviceClassManager) cleanupStaleGroupingDeviceClasses(ctx context.Conte
 	}
 
 	for _, dc := range classes.Items {
+		if !m.ownedByThisDriver(&dc) {
+			continue
+		}
 		if _, exists := active[dc.Name]; !exists {
 			if err := m.client.ResourceV1().DeviceClasses().Delete(ctx, dc.Name, metav1.DeleteOptions{}); err != nil {
 				if !errors.IsNotFound(err) {
@@ -1900,6 +1920,10 @@ func (m *DeviceClassManager) publishDeviceClass(ctx context.Context, dc *resourc
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get DeviceClass %s: %w", dc.Name, err)
+	}
+	if existing.Labels[CoordinatorDriverName+"/managed"] != "true" {
+		return fmt.Errorf("DeviceClass %s exists but is not managed by %s (missing label %s/managed=true); refusing to overwrite",
+			dc.Name, CoordinatorDriverName, CoordinatorDriverName)
 	}
 
 	merged := existing.DeepCopy()
