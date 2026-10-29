@@ -86,6 +86,9 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 	if mode == "" {
 		mode = dc.Labels[controller.LabelMode]
 	}
+	if mode == "" {
+		mode = string(controller.OfferingModeContainer)
+	}
 	requests := make([]ContractRequest, 0, len(config.SubResources))
 	for _, sr := range config.SubResources {
 		requests = append(requests, ContractRequest{

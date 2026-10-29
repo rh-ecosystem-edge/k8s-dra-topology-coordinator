@@ -231,6 +231,28 @@ func TestRunExplainRejectsUnsupportedPartitionConfigVersion(t *testing.T) {
 	assert.ErrorContains(t, err, `managed DeviceClass "future" has unsupported PartitionConfig apiVersion "nodepartition.dra.k8s.io/v2"`)
 }
 
+func TestRunExplainDefaultsLegacyModeToContainer(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("legacy", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "legacy",
+		controller.LabelAggregate: "true",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "subResources": [{"deviceClass":"dra.cpu","count":1}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var encoded bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &encoded, "legacy", "json"))
+	var contract Contract
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &contract))
+	assert.Equal(t, "container", contract.Mode)
+	assert.Contains(t, encoded.String(), `"mode": "container"`)
+}
+
 func TestRunGet(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	for _, dc := range fixtureClasses() {
