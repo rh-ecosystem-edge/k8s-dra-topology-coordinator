@@ -106,22 +106,30 @@ func (c *blockingKubeClient) ResourceV1() resourceclient.ResourceV1Interface {
 	return c.resource
 }
 
-func TestController_Reconcile_DuplicateUserNamesLogsActionableError(t *testing.T) {
-	ctrl := NewController(k8sfake.NewSimpleClientset(), CoordinatorDriverName, PartitionModeGroupings)
+func TestController_Reconcile_DuplicateUserNamesFailsWithoutPublishing(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	ctrl := NewController(client, CoordinatorDriverName, PartitionModeGroupings)
 	for _, cmName := range []string{"first", "second"} {
 		require.NoError(t, ctrl.groupingStore.LoadFromConfigMap(
 			makeGroupingConfigMap(cmName, validGroupingData("shared-offering")),
 		))
 	}
 
+	var reconcileErr error
 	logs := captureKlog(t, func() {
-		require.NoError(t, ctrl.reconcile(context.Background()))
+		reconcileErr = ctrl.reconcile(context.Background())
 	})
 
+	require.Error(t, reconcileErr)
+	assert.Contains(t, reconcileErr.Error(), "duplicate grouping name")
+	assert.Contains(t, reconcileErr.Error(), "shared-offering")
 	assert.Contains(t, logs, "data.name")
-	assert.Contains(t, logs, "shared-offering")
 	assert.Contains(t, logs, "default/first")
 	assert.Contains(t, logs, "default/second")
+
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, classes.Items)
 }
 
 func TestController_NonLeaderDoesNotPublishUntilEnabled(t *testing.T) {

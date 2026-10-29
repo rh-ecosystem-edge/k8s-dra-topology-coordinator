@@ -24,6 +24,8 @@ type GroupingInstance struct {
 	Rail bool
 	// Intent contains optional discovery metadata from the source grouping.
 	Intent IntentMetadata
+	// AutoDetected marks instances of coordinator-derived groupings.
+	AutoDetected bool
 	// Alignment is the topology attribute this instance matched on
 	// (e.g., "pcieRoot", "numaNode").
 	Alignment string
@@ -324,6 +326,7 @@ func (b *GroupingBuilder) buildInstance(
 		Mode:               grouping.Mode,
 		Rail:               grouping.Rail,
 		Intent:             grouping.Intent,
+		AutoDetected:       grouping.AutoDetected,
 		Alignment:          alignment,
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),

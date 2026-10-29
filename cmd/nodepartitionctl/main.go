@@ -1,0 +1,260 @@
+// Command nodepartitionctl is a read-only catalog client for the Node
+// Partition Topology Coordinator. It lists the DeviceClasses the coordinator
+// manages and the offerings built on them.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+	resourcev1 "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
+)
+
+var (
+	kubeconfig  string
+	kubeContext string
+	output      string
+	showAll     bool
+)
+
+func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "nodepartitionctl",
+		Short:         "Discover Node Partition Topology Coordinator offerings",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "",
+		"Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
+	root.PersistentFlags().StringVar(&kubeContext, "context", "", "Kubeconfig context to use")
+	root.PersistentFlags().StringVarP(&output, "output", "o", "table", "Output format: table or json")
+
+	offerings := &cobra.Command{Use: "offerings", Short: "List and inspect offerings"}
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List offerings (curated offerings by default)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			return runList(cmd.Context(), client, cmd.OutOrStdout(), showAll, output)
+		},
+	}
+	list.Flags().BoolVar(&showAll, "all", false,
+		"Include grouping, auto-detected, and partition classes, not only curated offerings")
+	get := &cobra.Command{
+		Use:               "get NAME",
+		Short:             "Show one offering or managed class",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: managedNameCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			return runGet(cmd.Context(), client, cmd.OutOrStdout(), args[0], output)
+		},
+	}
+	explain := &cobra.Command{
+		Use:               "explain NAME",
+		Short:             "Explain the normalized hardware request contract",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: managedNameCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			return runExplain(cmd.Context(), client, cmd.OutOrStdout(), args[0], output)
+		},
+	}
+	offerings.AddCommand(list, get, explain)
+	root.AddCommand(offerings)
+	root.InitDefaultCompletionCmd()
+	return root
+}
+
+func newClient() (kubernetes.Interface, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	rules.ExplicitPath = kubeconfig
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		rules, &clientcmd.ConfigOverrides{CurrentContext: kubeContext}).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
+	}
+	return client, nil
+}
+
+func loadEntries(ctx context.Context, client kubernetes.Interface) ([]Entry, error) {
+	classes, err := loadManagedClasses(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	return buildEntries(classes), nil
+}
+
+func loadManagedClasses(ctx context.Context, client kubernetes.Interface) ([]resourcev1.DeviceClass, error) {
+	classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
+		LabelSelector: controller.LabelManaged + "=true",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list DeviceClasses: %w", err)
+	}
+	return classes.Items, nil
+}
+
+func runList(ctx context.Context, client kubernetes.Interface, w io.Writer, all bool, format string) error {
+	if err := checkFormat(format); err != nil {
+		return err
+	}
+	entries, err := loadEntries(ctx, client)
+	if err != nil {
+		return err
+	}
+	entries = filterEntries(entries, all)
+	if format == "json" {
+		if entries == nil {
+			entries = []Entry{}
+		}
+		return writeJSON(w, entries)
+	}
+	if len(entries) == 0 {
+		_, err := fmt.Fprintln(w, "No offerings found. Use --all to include non-curated classes.")
+		return err
+	}
+	rows := [][]string{{"NAME", "KIND", "DISPLAY NAME", "INTENT", "VISIBILITY", "MODE", "ALIGNMENT", "COUNT", "VARIANTS"}}
+	for _, e := range entries {
+		rows = append(rows, []string{compact(e.Name, 34), compact(e.Kind, 13), compact(dash(e.DisplayName), 32),
+			compact(dash(e.IntentLevel), 16), compact(dash(e.Visibility), 10), compact(dash(e.Mode), 11),
+			compact(dash(e.Alignment), 10), strconv.Itoa(e.Count), strconv.Itoa(len(e.Variants))})
+	}
+	return writeTable(w, rows)
+}
+
+func runGet(ctx context.Context, client kubernetes.Interface, w io.Writer, name, format string) error {
+	if err := checkFormat(format); err != nil {
+		return err
+	}
+	classes, err := loadManagedClasses(ctx, client)
+	if err != nil {
+		return err
+	}
+	entry, ok := entryForName(classes, name)
+	if ok {
+		if format == "json" {
+			return writeJSON(w, entry)
+		}
+		return writeTable(w, [][]string{
+			{"Name:", entry.Name},
+			{"Kind:", entry.Kind},
+			{"Display name:", dash(entry.DisplayName)},
+			{"Description:", dash(entry.Description)},
+			{"Intent level:", dash(entry.IntentLevel)},
+			{"Visibility:", dash(entry.Visibility)},
+			{"Categories:", dash(strings.Join(entry.Categories, ", "))},
+			{"Workload types:", dash(strings.Join(entry.WorkloadTypes, ", "))},
+			{"Mode:", dash(entry.Mode)},
+			{"Alignment:", dash(entry.Alignment)},
+			{"Count:", strconv.Itoa(entry.Count)},
+			{"Variants:", dash(strings.Join(entry.Variants, ", "))},
+		})
+	}
+	return fmt.Errorf("no managed DeviceClass %q found", name)
+}
+
+func entryForName(classes []resourcev1.DeviceClass, name string) (Entry, bool) {
+	for _, entry := range buildEntries(classes) {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+
+	aggregateKinds := make(map[string]string)
+	for _, dc := range classes {
+		if dc.Labels[controller.LabelManaged] != "true" || dc.Labels[controller.LabelAggregate] != "true" {
+			continue
+		}
+		if grouping := dc.Labels[controller.LabelGrouping]; grouping != "" {
+			aggregateKinds[grouping] = groupingKind(dc)
+		}
+	}
+	for _, dc := range classes {
+		if dc.Name != name || dc.Labels[controller.LabelManaged] != "true" || dc.Labels[controller.LabelGrouping] == "" {
+			continue
+		}
+		kind := groupingKind(dc)
+		if aggregateKind, ok := aggregateKinds[dc.Labels[controller.LabelGrouping]]; ok {
+			kind = aggregateKind
+		}
+		return newEntry(dc, kind), true
+	}
+	return Entry{}, false
+}
+
+func writeTable(w io.Writer, rows [][]string) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, row := range rows {
+		if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func compact(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(runes[:max])
+	}
+	left := (max - 1) / 2
+	right := max - 1 - left
+	return string(runes[:left]) + "…" + string(runes[len(runes)-right:])
+}
+
+func checkFormat(format string) error {
+	if format != "table" && format != "json" {
+		return fmt.Errorf("invalid --output %q: must be table or json", format)
+	}
+	return nil
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}

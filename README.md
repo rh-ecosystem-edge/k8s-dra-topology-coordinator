@@ -319,8 +319,9 @@ Grouping ConfigMaps may include these optional keys in `data` to describe an off
 | `categories` | Comma-separated list | `nodepartition.dra.k8s.io/categories` annotation |
 | `workloadTypes` | Comma-separated list | `nodepartition.dra.k8s.io/workload-types` annotation |
 | `visibility` | `public` or `internal` | `nodepartition.dra.k8s.io/visibility` label |
+| `offering` | `true` or `false` | `nodepartition.dra.k8s.io/offering` label on the aggregate class |
 
-All six metadata keys are optional, so valid existing grouping ConfigMaps need no metadata changes. The required `data.name` must sanitize to a DNS-1123 label of at most 56 characters; validation may reject older invalid or overlong names. The 63-code-point `displayName` cap and 1024-code-point `description` cap are project policies, not Kubernetes API limits. `categories` and `workloadTypes` are split on commas, trimmed, emptied values dropped, and duplicates removed while retaining first-seen order. Each list accepts at most 16 unique entries of at most 63 Unicode code points; the published annotation joins those entries with commas.
+All seven metadata keys are optional, so valid existing grouping ConfigMaps need no metadata changes. The required `data.name` must sanitize to a DNS-1123 label of at most 56 characters; validation may reject older invalid or overlong names. The 63-code-point `displayName` cap and 1024-code-point `description` cap are project policies, not Kubernetes API limits. `categories` and `workloadTypes` are split on commas, trimmed, emptied values dropped, and duplicates removed while retaining first-seen order. Each list accepts at most 16 unique entries of at most 63 Unicode code points; the published annotation joins those entries with commas.
 
 Intent labels and annotations appear on aggregate DeviceClasses for user-defined groupings. Per-instance and auto-detected grouping classes do not receive intent metadata. `visibility` is published only when explicitly set. Discover matching classes with labels:
 
@@ -331,9 +332,35 @@ kubectl get deviceclasses -l nodepartition.dra.k8s.io/visibility=public \
   -o custom-columns='NAME:.metadata.name,LEVEL:.metadata.labels.nodepartition\.dra\.k8s\.io/intent-level,DISPLAY:.metadata.annotations.nodepartition\.dra\.k8s\.io/display-name'
 ```
 
+Every grouping DeviceClass also carries `nodepartition.dra.k8s.io/mode` (`container` or `passthrough`) and `nodepartition.dra.k8s.io/source` (`configmap` or `auto`). Aggregate classes carry `nodepartition.dra.k8s.io/aggregate=true`. The `offering` label is set only from the explicit `offering: "true"` key; it is never inferred from other metadata, and it marks the class as a stable request target.
+
+`nodepartitionctl` lists the same information without label selectors. It needs `get` and `list` on `deviceclasses`:
+
+```sh
+nodepartitionctl offerings list            # curated offerings only
+nodepartitionctl offerings list --all      # plus grouping, auto-detected, and partition classes
+nodepartitionctl offerings get gpu-inference -o json
+nodepartitionctl offerings get gpu-inference-rail0 -o json
+nodepartitionctl offerings explain gpu-inference
+nodepartitionctl offerings explain gpu-inference -o json
+```
+
+Entries have a `kind`: `offering` (aggregate class with `offering=true`), `grouping` (any other ConfigMap grouping), `auto-detected` (coordinator-derived PCIe pairing), or `partition` (fixed-hierarchy class). Per-instance classes appear as `variants` of their aggregate. Output never includes class selectors or opaque driver configuration. Names of `grouping`, `auto-detected`, and `partition` entries can change with topology, so only `offering` entries are stable request targets.
+
+Enable shell completion with the generated Cobra script:
+
+```sh
+echo 'source <(nodepartitionctl completion bash)' >> ~/.bashrc
+source ~/.bashrc
+```
+
+`offerings get NAME` and `offerings explain NAME` dynamically complete managed catalog and topology-specific variant names from the cluster. Completion only needs the current kubeconfig identity to have `list` access to the cluster-scoped `deviceclasses` resource. It is bounded to a short timeout, so an unavailable API server returns no names instead of blocking the shell. Variants are useful when a workload needs a particular topology shape, but their names can change after reconciliation.
+
+`offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, offering mode, topology alignment, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract; JSON field names remain stable (`mode`, `alignment`, and `partitionMode`).
+
 `categories` and `workloadTypes` are comma-joined annotations, so Kubernetes label selectors cannot query those values. Intent metadata currently supports discovery and cataloging only; request-level claim rejection based on categories or workload types is deferred, and the webhook expands claims from the DeviceClass scheduling configuration independently of these annotations.
 
-If a grouping ConfigMap update is invalid, the coordinator retains the last valid cached grouping and logs that its metadata may be stale until a valid update arrives. If distinct `data.name` values sanitize to the same DeviceClass name, or their emitted aggregate/per-instance names overlap (for example, an explicit `gpu` rail emits `gpu-rail0` while another grouping's aggregate is `gpu-rail0`), grouping publication pauses to preserve the last successfully published classes; other grouping updates wait until the conflict is corrected.
+If a grouping ConfigMap update is invalid, the coordinator retains the last valid cached grouping and logs that its metadata may be stale until a valid update arrives. If distinct `data.name` values sanitize to the same DeviceClass name, or their emitted aggregate/per-instance names overlap (for example, an explicit `gpu` rail emits `gpu-rail0` while another grouping's aggregate is `gpu-rail0`), grouping publication pauses to preserve the last successfully published classes; other grouping updates wait until the conflict is corrected. Two ConfigMaps that define the same `data.name` pause publication the same way, so an offering name always has one owner. A grouping class never overwrites a partition class with the same name, or the reverse; the publish fails instead.
 
 Example ConfigMaps:
 
@@ -397,6 +424,19 @@ docker build -t nodepartition-controller:dev .
 ```
 
 The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`. A source checkout does not publish an image automatically, so use the local-image override below when installing from source.
+
+Tagged releases also publish `nodepartitionctl` archives for Linux `amd64` and `arm64` on the GitHub Release page. Download the archive for your host, verify it with `checksums.txt`, and place the extracted binary on your `PATH`:
+
+```sh
+VERSION=0.1.0
+ARCH=amd64 # use arm64 on aarch64 hosts
+curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+tar -xzf "nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+mkdir -p ~/.local/bin
+install -m 0755 nodepartitionctl ~/.local/bin/nodepartitionctl
+```
 
 ## Helm installation
 

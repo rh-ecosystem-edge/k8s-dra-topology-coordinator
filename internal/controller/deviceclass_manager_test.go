@@ -2246,3 +2246,52 @@ func TestDeviceClassManager_PublishedPartitionConfigsCarryAPIVersion(t *testing.
 	partition, _ := manager.buildPartitionConfig(PartitionPCIeRoot, PartitionDevice{DeviceCounts: map[string]int{"gpu.amd.com": 1}})
 	assert.Equal(t, PartitionConfigAPIVersion, partition.APIVersion)
 }
+
+func TestDeviceClassManager_SyncGroupingDeviceClasses_CatalogLabels(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	instance := multiDeviceGroupingInstance(0)
+	instance.Intent = IntentMetadata{Offering: true}
+	results := []GroupingResult{{NodeName: "node-1", Instances: []GroupingInstance{instance}}}
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), results))
+
+	aggregate, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "true", aggregate.Labels[LabelAggregate])
+	assert.Equal(t, "true", aggregate.Labels[LabelOffering])
+	assert.Equal(t, string(OfferingModeContainer), aggregate.Labels[LabelMode])
+	assert.Equal(t, SourceConfigMap, aggregate.Labels[LabelSource])
+
+	rail, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair-rail0", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, rail.Labels, LabelAggregate)
+	assert.NotContains(t, rail.Labels, LabelOffering)
+	assert.Equal(t, SourceConfigMap, rail.Labels[LabelSource])
+
+	// Dropping the flag removes the label on the next sync.
+	instance.Intent = IntentMetadata{}
+	results = []GroupingResult{{NodeName: "node-1", Instances: []GroupingInstance{instance}}}
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), results))
+	aggregate, err = client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, aggregate.Labels, LabelOffering)
+	assert.Equal(t, "true", aggregate.Labels[LabelAggregate])
+}
+
+func TestDeviceClassManager_SyncGroupingDeviceClasses_AutoDetectedSource(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	instance := multiDeviceGroupingInstance(0)
+	instance.AutoDetected = true
+	instance.Mode = ""
+	results := []GroupingResult{{NodeName: "node-1", Instances: []GroupingInstance{instance}}}
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), results))
+
+	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, classes.Items)
+	for _, dc := range classes.Items {
+		assert.Equal(t, SourceAutoDetected, dc.Labels[LabelSource], dc.Name)
+		assert.Equal(t, string(OfferingModeContainer), dc.Labels[LabelMode], dc.Name)
+	}
+}

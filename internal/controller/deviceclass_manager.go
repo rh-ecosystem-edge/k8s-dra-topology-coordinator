@@ -30,6 +30,28 @@ const (
 	// is configurable through --driver-name.
 	CoordinatorDriverName = "nodepartition.dra.k8s.io"
 
+	// DeviceClass label and annotation keys read by the catalog CLI.
+	LabelManaged       = CoordinatorDriverName + "/managed"
+	LabelGrouping      = CoordinatorDriverName + "/grouping"
+	LabelPartitionType = CoordinatorDriverName + "/partitionType"
+	LabelAlignment     = CoordinatorDriverName + "/alignment"
+	LabelCount         = CoordinatorDriverName + "/count"
+	LabelAggregate     = CoordinatorDriverName + "/aggregate"
+	LabelOffering      = CoordinatorDriverName + "/offering"
+	LabelMode          = CoordinatorDriverName + "/mode"
+	LabelSource        = CoordinatorDriverName + "/source"
+	LabelIntentLevel   = CoordinatorDriverName + "/intent-level"
+	LabelVisibility    = CoordinatorDriverName + "/visibility"
+
+	AnnotationDisplayName   = CoordinatorDriverName + "/display-name"
+	AnnotationDescription   = CoordinatorDriverName + "/description"
+	AnnotationCategories    = CoordinatorDriverName + "/categories"
+	AnnotationWorkloadTypes = CoordinatorDriverName + "/workload-types"
+
+	// Values of LabelSource.
+	SourceConfigMap    = "configmap"
+	SourceAutoDetected = "auto"
+
 	// PartitionConfigAPIVersion versions the PartitionConfig schema embedded in
 	// managed DeviceClasses. Any change to a field that affects claim expansion
 	// requires a new version, so a webhook that does not understand it denies
@@ -1351,6 +1373,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		requests         map[string]RequestContract
 		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
+		autoDetected     bool           // identical across instances, like intent
 		acc              *deviceIntersectionState
 		minInstanceIndex int
 		count            int // sum of entry.count
@@ -1367,6 +1390,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				requests:         entry.representative.Requests,
 				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
+				autoDetected:     entry.representative.AutoDetected,
 				acc:              newDeviceIntersectionState(),
 				minInstanceIndex: entry.representative.InstanceIndex,
 			}
@@ -1391,6 +1415,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			Mode:           state.mode,
 			Requests:       state.requests,
 			Intent:         state.intent,
+			AutoDetected:   state.autoDetected,
 			DeviceCounts:   intersectedCounts,
 			DeviceCapacity: intersectedCap,
 			Devices:        state.acc.devices,
@@ -1408,6 +1433,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		dc.Name = sanitizeForName(entry.representative.GroupingName)
 		delete(dc.Labels, CoordinatorDriverName+"/numa")
 		delete(dc.Labels, CoordinatorDriverName+"/railIndex")
+		dc.Labels[LabelAggregate] = "true"
 		applyIntentMetadata(dc, entry.representative.Intent)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish aggregate DeviceClass %s: %w", dc.Name, err))
@@ -1678,6 +1704,16 @@ func (m *DeviceClassManager) buildGroupingDeviceClass(
 		CoordinatorDriverName + "/grouping":  truncateLabel(representative.GroupingName),
 		CoordinatorDriverName + "/alignment": representative.Alignment,
 	}
+	mode := representative.Mode
+	if mode == "" {
+		mode = OfferingModeContainer
+	}
+	labels[LabelMode] = string(mode)
+	if representative.AutoDetected {
+		labels[LabelSource] = SourceAutoDetected
+	} else {
+		labels[LabelSource] = SourceConfigMap
+	}
 	if representative.Rail {
 		labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", representative.InstanceIndex)
 	}
@@ -1716,6 +1752,12 @@ func (m *DeviceClassManager) buildGroupingDeviceClass(
 }
 
 func applyIntentMetadata(dc *resourcev1.DeviceClass, intent IntentMetadata) {
+	if intent.Offering {
+		if dc.Labels == nil {
+			dc.Labels = make(map[string]string)
+		}
+		dc.Labels[LabelOffering] = "true"
+	}
 	if !intent.IsOffering() {
 		return
 	}
@@ -1933,6 +1975,20 @@ func (m *DeviceClassManager) publishDeviceClass(ctx context.Context, dc *resourc
 	if existing.Labels[CoordinatorDriverName+"/managed"] != "true" {
 		return fmt.Errorf("DeviceClass %s exists but is not managed by %s (missing label %s/managed=true); refusing to overwrite",
 			dc.Name, CoordinatorDriverName, CoordinatorDriverName)
+	}
+
+	// Partition and grouping classes share one namespace. Refuse to take over a
+	// class the other path owns: each sync would strip the other's labels.
+	if _, ok := existing.Labels[LabelPartitionType]; ok {
+		if _, building := dc.Labels[LabelGrouping]; building {
+			return fmt.Errorf("DeviceClass %s is a partition class; refusing to overwrite it with grouping %q",
+				dc.Name, dc.Labels[LabelGrouping])
+		}
+	}
+	if _, ok := existing.Labels[LabelGrouping]; ok {
+		if _, building := dc.Labels[LabelPartitionType]; building {
+			return fmt.Errorf("DeviceClass %s is a grouping class; refusing to overwrite it with a partition class", dc.Name)
+		}
 	}
 
 	merged := existing.DeepCopy()

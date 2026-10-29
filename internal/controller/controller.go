@@ -378,6 +378,16 @@ func (c *Controller) reconcile(ctx context.Context) error {
 				"Duplicate user-defined device grouping", "field", "data.name",
 				"groupingName", name, "configMaps", sources)
 		}
+		// A duplicate name has no stable owner, so no grouping class is
+		// published until the administrator removes it.
+		if len(names) > 0 {
+			details := make([]string, 0, len(names))
+			for _, name := range names {
+				details = append(details, fmt.Sprintf("field=data.name name=%q configMaps=%v", name, duplicateNames[name]))
+			}
+			metrics.ReconciliationErrors.Inc()
+			return fmt.Errorf("duplicate grouping name: %s", strings.Join(details, "; "))
+		}
 
 		// Auto-detect PCIe root pairings (GPU+NIC, GPU+NVMe, etc.)
 		autoGroupings := c.partitionBuilder.DetectPCIeRootPairings()
