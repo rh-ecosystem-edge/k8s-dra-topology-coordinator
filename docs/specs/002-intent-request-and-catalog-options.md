@@ -163,7 +163,7 @@ Limitations:
 
 ### Option A: Kubernetes-native catalog and CLI
 
-Use aggregate managed DeviceClasses as the catalog source and add a read-only CLI:
+Use coordinator-managed DeviceClasses as the catalog source and add a read-only CLI:
 
 ```sh
 nodepartitionctl offerings list
@@ -176,8 +176,21 @@ The output should include:
 - display name and description;
 - intent level, categories, and workload types;
 - visibility and consumer mode;
-- alignment and available topology-specific variants; and
-- readiness or availability information.
+- alignment and available topology-specific variants;
+- readiness or availability information; and
+- the entry kind (see below).
+
+The catalog lists every class the coordinator manages (`managed=true`), not only curated offerings, so users can discover fixed and auto-detected classes too. Each entry has a `kind`, derived from existing labels:
+
+| Kind | Source | Labels |
+| --- | --- | --- |
+| `offering` | aggregate class of a grouping that carries the explicit offering label | `managed=true`, `grouping`, `offering=true` |
+| `grouping` | aggregate class of a grouping without the offering label | `managed=true`, `grouping` |
+| `partition` | class the controller builds from detected topology | `managed=true`, `partitionType` |
+
+By default `offerings list` shows `offering` entries only. `--all` adds the other kinds, and `offerings get <name>` works for any kind.
+
+Only `offering` entries carry the stable-name, collision-check, and annotation-resolution guarantees. The names of `grouping` and `partition` classes can change when topology or driver attributes change, so the catalog marks them informational and does not present them as stable request targets. They are not resolvable through the Option B offering annotation.
 
 A DeviceClass has no status. The `count` label gives a static instance count; live availability requires reading ResourceSlices and allocated ResourceClaims. Either name those sources as a requirement or leave availability out of the first version.
 
@@ -254,7 +267,8 @@ This sequence keeps the existing `PartitionConfig` and webhook expansion path in
 - Existing ConfigMap offerings continue to produce the same aggregate and topology-specific DeviceClasses.
 - Native claims without offering references pass through unchanged.
 - Unknown or ambiguous offering references fail closed with an actionable error.
-- Offering resolution targets only aggregate, coordinator-managed DeviceClasses.
+- Offering resolution targets only aggregate, coordinator-managed DeviceClasses that carry the explicit offering label.
+- The catalog lists fixed and auto-detected managed classes with an explicit `kind`, and never presents them as stable offerings.
 - Repeated admission of the same object is idempotent.
 - An offering resolves identically at template, Pod, and claim admission.
 - Catalog responses expose user-facing metadata without leaking opaque driver configuration by default.
@@ -272,3 +286,4 @@ This sequence keeps the existing `PartitionConfig` and webhook expansion path in
 - How offerings are renamed or versioned without breaking existing claims.
 - Whether to mutate templates at admission or teach the Pod and VMI handlers the resolver.
 - Whether `firstAvailable` subrequests are supported.
+- Whether `grouping` and `partition` entries should be hidden from the default catalog view or shown alongside offerings.
