@@ -1,6 +1,12 @@
 # PR2 Implementation Plan: Intent-Based Hardware Offerings (metadata + discovery + docs)
 
 **Status:** Implemented — see PR #13
+**Document status:** Historical design record. The repository has since added
+explicit rails, container/passthrough modes, versioned `PartitionConfig`,
+custom driver identity, HA admission consistency, and the coordinator harness
+bridge. The historical snapshots below describe the state at PR2 design time;
+use [`README.md`](../../README.md), [`test/e2e/README.md`](../../test/e2e/README.md),
+and [`docs/harness-test-plan.md`](../harness-test-plan.md) for current behavior.
 **Handoff target:** codex
 **Repo:** `rh-ecosystem-edge/k8s-dra-topology-coordinator` (Go, Kubernetes DRA)
 **Base branch:** `main` — PR1 (https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/pull/12) has merged. `main` at commit `29591d4` already contains PR1's fixes: `publishDeviceClass` is merge-preserving and idempotent, and opaque-config marshalling is deterministic. PR2's aggregate metadata and no-op tests depend on both, and both are now present on `main`. Branch from `main`.
@@ -36,8 +42,8 @@ PR2 adds the metadata layer on top of that fixed foundation.
 - **`internal/controller/deviceclass_manager.go`** — `SyncGroupingDeviceClasses` (`:1018-1116`), aggregate emission loop at `:1066-1096` (representative picked deterministically by lowest `RailIndex` as of PR1, `:1080-1086`), `buildGroupingDeviceClass` (`:1211-1268`, `ObjectMeta` currently sets only `Name` and `Labels` — no `Annotations` field at all), `publishDeviceClass` (`:1437-...`, merge-preserving as of PR1 — labels/annotations your code sets will be merged in using the `nodepartition.dra.k8s.io/` prefix as the ownership boundary).
 - **`internal/controller/controller.go`** — `reconcile` (`groupings := c.groupingStore.GetGroupings()` at `:228`, `mergedGroupings := mergeGroupings(...)` at `:255`), `mergeGroupings` (`:434-447`, keys by `DeviceGrouping.Name`, `userDefined` wins).
 - **`internal/webhook/webhook.go`** — `getPartitionConfig` (`:519-547` approx, reads only `dc.Spec.Config`) — **not touched by this PR**; verify this remains true after your changes.
-- **No `examples/` directory exists.** No grouping ConfigMap documentation exists in `README.md` at all — the `### Example: NVIDIA NVLink Domain Grouping` section documents a different mechanism (topology *rules*, not device groupings).
-- **The mock device driver and `test/e2e/run-e2e.sh` require external infrastructure** (a Vagrant cluster, `github.com/fabiendupont/mock-device`) not present in this environment. E2E cannot be run here; report as not executed.
+- At the time of this design, no `examples/` directory or grouping section existed in `README.md`; both were added by the implementation. Current examples are under [`examples/`](../../examples/), and current live/harness prerequisites are documented in the linked E2E guides.
+- The direct mock-device suite still requires external cluster infrastructure, while the coordinator bridge can run under `k8s-dra-harness` with its hardware-free adapter. Report live E2E by the lane actually executed rather than treating the historical PR2 environment note as current status.
 - Tests use plain `testing` + `testify`, no Ginkgo. `make test` runs unit tests and an envtest/integration suite together (needs `setup-envtest` k8s binaries, fetched automatically). `golangci-lint` was not installed in the environment this plan was written in — run `make lint` if available in yours, and report if it isn't.
 
 ## Implementation steps
@@ -224,7 +230,7 @@ kubectl get deviceclasses -l nodepartition.dra.k8s.io/intent-level=workload
 kubectl get deviceclass gpu-inference -o yaml   # confirm labels, annotations, and unchanged Spec.Config
 ```
 
-**End-to-end tests cannot be run in a typical dev environment.** `test/e2e/run-e2e.sh` requires an external mock driver (`github.com/fabiendupont/mock-device`) and a Vagrant cluster publishing `mock-accel.example.com` ResourceSlices. Report as not executed rather than as passing, unless that infrastructure is actually available.
+**End-to-end tests remain environment-dependent.** The direct suite requires an external mock driver (`github.com/fabiendupont/mock-device`) and a disposable cluster publishing `mock-accel.example.com` ResourceSlices; the harness path provides a separate driver/runtime setup. Report the selected lane and its evidence rather than marking E2E as globally passed or skipped.
 
 ## Deliverables (per the project's standing convention for this feature)
 

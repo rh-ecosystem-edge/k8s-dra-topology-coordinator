@@ -31,6 +31,8 @@ The webhook runs on every replica and:
 
 Ordinary DRA claims that do not reference a coordinator `PartitionConfig` pass through unchanged. No scheduler plugin is required.
 
+The controller cache and webhook run on every replica, but only the elected leader publishes DeviceClasses. Followers refresh topology rules and grouping data locally so equivalent admission requests receive the same expansion regardless of which replica serves them. Losing leadership cancels an in-flight reconciliation before the next leader can publish. The webhook starts only after its local cache is synchronized.
+
 ## Partition outputs
 
 The controller publishes `DeviceClass` objects for the topology it discovers. The fixed partition classes are:
@@ -149,6 +151,14 @@ data:
   enforcement: required
 ```
 
+Apply a device-grouping example in the namespace selected by `controller.configNamespace` (the Helm release namespace by default):
+
+```sh
+kubectl -n nodepartition apply -f examples/intent-workload-gpu-inference.yaml
+```
+
+Set `controller.watchAllNamespaces=true` only when the broader ConfigMap trust boundary is intentional; any namespace that can create a labeled ConfigMap can then influence the published catalog.
+
 Rule fields:
 
 | Field | Required | Values | Purpose |
@@ -184,7 +194,6 @@ data:
   name: gpu-nic-pair
   rail: "true"
   alignment: pcieRoot
-  fallback: numaNode
   devices: |
     - class: gpu.example.com
       count: 1
@@ -194,11 +203,17 @@ data:
 
 `alignment` and `fallback` accept `pcieRoot`, `numaNode`, or `socket`. Device entries require `class` and a positive `count`; each entry may also provide a `capacity` map for consumable DRA capacity. Set `rail: "true"` only for an explicit GPU+NIC offering that must be satisfied on one PCIe root. Rail offerings must use `pcieRoot` alignment without a fallback and exactly two device entries with `count: 1`; the coordinator treats the device classes as the operator-declared GPU and NIC pair and does not infer rail intent from class names.
 
-Keys inside `devices` are matched strictly: an unknown or duplicate key (for example `passthru:` instead of `passthrough:`) rejects the ConfigMap with an error naming the key. Matching stays case-insensitive, so `Class:` is still accepted. Unknown top-level `data` keys are ignored with a warning. A rejected ConfigMap is not loaded at startup, so its DeviceClasses are removed on the next reconcile; before upgrading, check every `devices:` block for keys outside the supported set: `class`, `requestClass`, `count`, `capacity`, `passthrough`, `selectors`, and `opaque`.
+`alignment` is the preferred co-location level. `fallback` is opt-in: it evaluates remaining devices at a looser level and publishes separate fallback instances; it is never added automatically and it does not stack a NUMA constraint on top of a PCIe-root class. An aggregate grouping preserves one alignment level without pinning a particular value, so `alignment: numaNode` means all expanded requests must share one NUMA node while the scheduler chooses which node. If a grouping produces both preferred and fallback instances, the aggregate does not encode both alternatives; select a topology-specific class when the alignment choice matters.
+
+Keys inside `devices` are matched strictly: an unknown or duplicate key (for example `passthru:` instead of `passthrough:`) rejects the ConfigMap with an error naming the key. Matching stays case-insensitive, so `Class:` is still accepted. Unknown top-level `data` keys are ignored with a warning. A ConfigMap rejected on initial load is absent from the grouping store, so its DeviceClasses are removed on the next reconcile; an invalid update keeps the last valid cached grouping until the update is corrected. Before upgrading, check every `devices:` block for keys outside the supported set: `class`, `requestClass`, `count`, `capacity`, `passthrough`, `selectors`, and `opaque`.
 
 Managed DeviceClasses carry a versioned `PartitionConfig` (`apiVersion: nodepartition.dra.k8s.io/v1alpha1`). The webhook denies claims against a managed class whose `apiVersion` it does not support, or whose config has fields it does not know, instead of expanding the claim without them. Classes published before versioning have no `apiVersion` and are still accepted until the next reconcile rewrites them. Strict decoding only protects webhooks that already include it, so during a rolling update from an older release the old pods still ignore unknown fields.
 
 The aggregate DeviceClass keeps the grouping name. Explicit rail instances are named `<grouping>-rail<N>` and carry the `railIndex` label. Ordinary grouping instances retain their locality meaning in the name, such as `<grouping>-numa<N>`, `<grouping>-pcie-<root>`, or `<grouping>-socket<N>`, and do not carry `railIndex`. Fixed PCIe partition classes use their PCIe-root name directly and also do not use `railIndex`. This is a breaking rename for previously generated non-rail and fixed-partition `-rail<N>` classes. During an upgrade, the coordinator pauses publication while those legacy classes exist; remove the legacy classes (or uninstall/reinstall the release), update claims to the new topology-specific names, then resume reconciliation.
+
+All DeviceClasses are cluster-scoped. A topology-specific name describes a repeatable shape, not a node identity. When matching instances coalesce to one published name, the coordinator adds a `nodepartition.dra.k8s.io/count` label; that label is catalog metadata, not a DRA capacity field. Requesting such a class lets the scheduler choose any matching node; use Pod or VMI node affinity/selection when placement on a particular node is required. The grouping-wide aggregate has no fixed rail or locality value and is scheduler-placed across every satisfiable instance.
+
+For an aggregate `alignment: numaNode` grouping, every participating device must expose the scalar NUMA attribute needed to build one `matchAttribute` constraint. If a driver publishes only list-valued NUMA attributes, the coordinator keeps the topology-specific classes but may omit the grouping-wide NUMA aggregate.
 
 Passthrough devices must declare their VFIO contract explicitly: set `requestClass`, `selectors`, or `opaque` on every device with `passthrough: true`, otherwise the ConfigMap is rejected. The coordinator no longer injects VFIO configuration from driver names, so existing passthrough ConfigMaps must be updated before VMs using them restart. If `requestClass` is served by a different driver than `class`, also set `requestDriver` (see below); otherwise the generated NUMA selector uses the attribute namespace of the driver that publishes `class`.
 
@@ -258,6 +273,21 @@ devices: |
 ```
 
 The `passthrough` flag controls VM-oriented request splitting and KubeVirt host-device mapping. Actual binding, CDI creation, and cleanup remain responsibilities of the selected DRA driver.
+
+The coordinator's passthrough fields are generic; the selected driver still defines the actual VFIO contract. Common integration shapes are:
+
+| Integration | Coordinator-side declaration | Driver-owned responsibility |
+| --- | --- | --- |
+| NVIDIA standalone GPU | Request the driver's VFIO DeviceClass (for example `vfio.gpu.nvidia.com`) and any driver-defined selectors | GPU VFIO preparation, CDI/device injection, and restore |
+| AMD GIM/VFIO path | Request the VFIO-capable class published by the AMD driver and use its documented selectors (for example a `type: vfio`/VF selector) | GIM/VFIO binding and guest device setup; do not infer this from an `amdgpu` class name |
+| SR-IOV | Use the SR-IOV driver's request class and copy its documented `VfConfig` opaque payload, such as `driver: vfio-pci` when that driver requires it | VF configuration, NAD/runtime integration, VFIO binding, and cleanup |
+| NVMe passthrough | Discover topology through `dra.nvme` but request the driver's VFIO class (for example `dra.nvme-vfio`) | NVMe rebind/unbind, guest exposure, and return to the normal driver |
+
+These names are examples, not coordinator-wide defaults. Inspect the installed driver's DeviceClasses and claim contract before creating a grouping. If a driver has separate `amdgpu`, GIM, or VFIO offerings, select the exact class and selectors for the desired runtime path.
+
+For a passthrough sub-resource with `count > 1` and no consumable capacity, the webhook creates separate `count: 1` requests so KubeVirt can map each physical device to a unique host device. Capacity-backed sub-resources keep their count and capacity request because they represent shared capacity rather than individually passed-through devices.
+
+For KubeVirt, reference a passthrough grouping from a `ResourceClaimTemplate` in the VMI's `resourceClaims` list. The webhook resolves the template before Kubernetes creates its generated claim, expands the declared requests, creates host-device entries only for explicitly marked passthrough sub-resources, and rewrites existing `requestName` fields when needed. A container-mode offering remains a normal DRA request and never causes implicit VFIO binding.
 
 ```yaml
 data:
@@ -320,6 +350,12 @@ The repository's E2E workflow exercises:
 - [mock-device](https://github.com/fabiendupont/mock-device) as the required mock accelerator driver; and
 - [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu) as an optional CPU driver in individual mode; it is required by the E2E `cross-driver` profile.
 
+The separate `k8s-dra-harness` integration can use its
+hardware-free `example` adapter or real CPU, GPU, and SR-IOV adapters. The direct
+E2E suite and the harness bridge are complementary: the former exercises the
+repository's full live test package, while the latter coordinates driver/runtime
+validation and preserves shared evidence and cleanup boundaries.
+
 Other drivers require their actual `ResourceSlice` driver names, DeviceClass names, attribute types, and topology attributes to be configured in rules. The coordinator does not assume a universal vendor attribute naming scheme.
 
 ## Prerequisites
@@ -328,6 +364,17 @@ Other drivers require their actual `ResourceSlice` driver names, DeviceClass nam
 - Go 1.25 or newer for local development;
 - `kubectl` and Helm for cluster installation; and
 - cert-manager, an OpenShift serving-certificate controller, or a manually provisioned webhook certificate, depending on the selected TLS mode.
+
+Optional features have their own cluster prerequisites:
+
+| Feature | Required when | Gate or dependency |
+| --- | --- | --- |
+| Consumable capacity | A grouping or partition requests `capacity` | Kubernetes `DRAConsumableCapacity` |
+| List-valued attributes | A driver publishes list-valued DRA attributes | Kubernetes `DRAListTypeAttributes`; scalar topology rules remain the portable default |
+| Node allocatable accounting | Node-level DRA CPU/memory accounting is consumed | Kubernetes `DRANodeAllocatableResources` |
+| KubeVirt host devices | A VMI consumes a passthrough grouping | KubeVirt/OpenShift Virtualization and the feature gate required by the selected device type |
+
+The coordinator does not enable cluster or KubeVirt feature gates. Verify the gate state and driver/runtime prerequisites before using capacity, list-valued attributes, or VM passthrough.
 
 The Helm chart declares a default cert-manager issuer of `selfsigned-issuer` but does not create that issuer. Create or configure an issuer before installing with the default TLS mode.
 
@@ -422,12 +469,16 @@ The registered controller metrics are:
 | `nodepartition_controller_nodes_total` | Gauge | Nodes represented in the current topology result |
 | `nodepartition_controller_deviceclasses_total` | Gauge | Managed partition and grouping DeviceClasses |
 | `nodepartition_controller_topology_rules_total` | Gauge | Active topology rules |
+| `nodepartition_webhook_expansions_total` | Counter | Partition claims expanded by the webhook |
+| `nodepartition_webhook_errors_total` | Counter | Webhook expansion or admission errors |
 
 ## Security notes
 
 The webhook port (`controller.webhook.port`) must be reachable only by the Kubernetes API server. The handlers trust the namespace and name in the AdmissionReview and cannot authenticate callers without client certificates, so restrict access with the chart NetworkPolicy (`controller.networkPolicy.enabled=true`).
 
-DeviceClass names are not scoped to a release: two releases with different `--driver-name` values in one cluster still collide on same-named DeviceClasses. Changing `--driver-name` also leaves the old driver's classes undeleted; remove them manually.
+The controller fails startup when the webhook certificate or key cannot be loaded, because a missing listener would otherwise block ResourceClaim admission. ResourceClaim webhook transport failures use `failurePolicy: Fail`; Pod and VMI transport failures use `failurePolicy: Ignore`, while the handlers still reject missing or malformed managed templates and expansion contracts.
+
+`driverName` is the configured DRA identity in generated selectors and opaque configuration. Coordinator labels, annotations, and the `PartitionConfig` API version continue to use the fixed `nodepartition.dra.k8s.io` metadata prefix. DeviceClass names are not scoped to a release: two releases with different `--driver-name` values in one cluster still collide on same-named DeviceClasses. Changing `--driver-name` also leaves the old driver's classes undeleted; remove them manually before installing under the new identity. The controller refuses to overwrite a same-named DeviceClass that is not coordinator-managed, but two coordinator releases still require unique names and an explicit migration plan.
 
 ## End-to-end testing
 
@@ -435,6 +486,15 @@ See [`test/e2e/README.md`](test/e2e/README.md) for the disposable-cluster contra
 profile selection, TLS settings, and validation with mock-device and dra-driver-cpu.
 Run `E2E_KUBECONFIG=/path/to/kubeconfig E2E_DISPOSABLE_CLUSTER=1 make e2e` only
 against a cluster dedicated to the test run.
+
+For harness-driven validation, see [`test/e2e/harness/README.md`](test/e2e/harness/README.md)
+and the full [`docs/harness-test-plan.md`](docs/harness-test-plan.md). The bridge
+lets `k8s-dra-harness` own drivers and workloads while this repository owns the
+coordinator release, supplied grouping/rule fixtures, catalog smoke evidence,
+and cleanup. The current bridge does not yet run allocation or VFIO assertions;
+synthetic ResourceSlices validate catalog publication, while admission coverage
+comes from the direct suite or future bridge probes and real VFIO binding still
+requires the hardware-driver lane.
 
 ## Contributing
 

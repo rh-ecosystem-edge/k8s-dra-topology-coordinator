@@ -1,5 +1,10 @@
 # Topology Coordinator Test Plan
 
+Status: the coordinator bridge described here is implemented at
+[`test/e2e/harness/run-coordinator-e2e.sh`](../test/e2e/harness/run-coordinator-e2e.sh).
+This document is the execution matrix and release-qualification runbook; the
+hardware and KubeVirt lanes remain environment-dependent.
+
 ## 1. Goal
 
 Validate the topology coordinator end to end with
@@ -19,7 +24,7 @@ coordinator cleanup.
 | Lane | Environment | Purpose | Run frequency |
 | --- | --- | --- | --- |
 | Unit | Go test and envtest | Fast deterministic logic and admission coverage | Every PR |
-| Harness smoke | Harness `example` adapter, no special hardware | Live webhook, catalog, native DRA allocation, failure and cleanup checks | Every merge |
+| Harness smoke | Harness `example` adapter, no special hardware | Coordinator catalog smoke and cleanup; target webhook, allocation, failure, and cleanup checks | Every merge |
 | Harness topology | Harness `example` plus CPU, or synthetic ResourceSlices | Cross-driver catalog/grouping and topology constraints | Nightly / release |
 | Hardware | SR-IOV, GPU, or RoCE-capable nodes | VFIO, real network allocation, device runtime behavior | Release qualification |
 | KubeVirt | Existing KubeVirt/OpenShift Virtualization with DRA gates | VMI template expansion and host-device mapping | Release qualification |
@@ -56,35 +61,43 @@ test against a shared production namespace.
 ### 3.2 Coordinator bridge
 
 The harness does not install the topology coordinator or inspect coordinator
-managed `DeviceClass` objects. Add a thin coordinator test script under
-`test/e2e/harness/` in this repository and invoke it as a harness verification
-command. This lets the harness keep the driver process alive while the
-coordinator script runs, and it preserves one cleanup boundary.
+managed `DeviceClass` objects. Invoke the implemented bridge under
+`test/e2e/harness/` as a harness verification command. This lets the harness
+keep the driver process alive while the coordinator script runs, and it
+preserves one cleanup boundary.
 
-The bridge script must:
+The current bridge script:
 
-1. apply topology rules and grouping ConfigMaps;
-2. install the coordinator Helm chart with a unique release name;
-3. wait for deployment readiness, webhook endpoints, leader election, and
-   managed DeviceClasses;
-4. run the coordinator assertions below;
-5. collect YAML, webhook responses, events, logs, and metrics under the
-   harness evidence directory; and
-6. delete claims, pods, ConfigMaps, the coordinator release, and any
-   synthetic ResourceSlices in a `trap` before returning.
+1. applies topology-rule, grouping, and synthetic ResourceSlice manifests when
+   they are explicitly supplied with `--rules`, `--groupings`, or
+   `--resource-slices`;
+2. installs the coordinator Helm chart with a unique release name;
+3. waits for deployment rollout and a managed `DeviceClass` whose opaque
+   configuration references the configured coordinator driver name;
+4. captures cluster/coordinator YAML, events, the leader lease, and controller
+   logs under the harness evidence directory; and
+5. deletes supplied fixtures, managed classes, the coordinator release, lease,
+   and namespace in a `trap` before returning.
 
-Because managed `DeviceClass` objects are cluster-scoped, the bridge must also
-mark and delete the classes produced by its configured driver name. The Helm
-release must use a run-scoped leader-election ID so parallel runs cannot share
-the same lease.
+The broader catalog, admission, allocation, HA, and KubeVirt matrix below is
+the target release-qualification coverage. Do not report those cases as
+passing from the current bridge smoke alone: it does not yet submit claims or
+workloads, probe webhook responses, assert metrics, or verify CDI/VFIO state.
+
+Because managed `DeviceClass` objects are cluster-scoped, the bridge marks and
+deletes the classes produced by its configured driver name. The Helm release
+uses a run-scoped leader-election ID so parallel runs cannot share the same
+lease. Driver namespaces, driver pods, claims, and workloads remain owned by
+the harness.
 
 The script receives `KUBECONFIG` and `DRA_HARNESS_NAMESPACE` from the harness;
-pass the evidence directory explicitly as a command argument. It must derive a
-unique coordinator release/run ID, label every object it creates, and use that
-label for cleanup. Cleanup must run on success and failure; on failure it
-should copy diagnostics before deleting only run-owned objects. Add a
-config-validation/smoke test for this script before wiring it into the harness
-verification command.
+pass the evidence directory explicitly as a command argument. It derives a
+unique coordinator release/run ID, labels supplied fixture objects, and uses
+Helm release metadata, namespace, and driver-name ownership checks for
+coordinator resources. Cleanup runs on success and failure and captures
+diagnostics before deleting only run-owned objects. The shell contract test
+(`bash test/e2e/harness/run-coordinator-e2e_test.sh`) covers the validation
+path before a live harness invocation.
 
 Configure the harness `testPlan.verification` block with the bridge script and
 an evidence directory. The command must be inside the configured `scriptsDir`
@@ -128,9 +141,9 @@ test-only drivers such as `test.gpu`, `test.nic`, and `test.cpu`:
 - put GPU and NIC devices on both matching and non-matching PCIe roots; and
 - delete every fixture at the end of the run.
 
-These fixtures prove coordinator publication and webhook mutation only. They
-must never be reported as proof of successful device allocation because no
-driver is preparing them.
+These fixtures prove coordinator publication. Direct admission tests cover
+webhook mutation, and synthetic fixtures must never be reported as proof of
+successful device allocation because no driver is preparing them.
 
 ## 4. Preconditions and baseline
 
@@ -143,7 +156,10 @@ Before each live run, record:
 - harness and coordinator Git commits, image digests, chart values, and the
   configured coordinator driver name; and
 - whether KubeVirt, cert-manager, NetworkPolicy enforcement, and the selected
-  DRA feature gates are present.
+  DRA feature gates are present. Capacity cases require
+  `DRAConsumableCapacity`; list-valued attribute cases require
+  `DRAListTypeAttributes`; node-accounting cases may require
+  `DRANodeAllocatableResources`.
 
 Fail preflight if the run would collide with an existing release, webhook,
 lease, or managed class. Save the baseline so cleanup can prove that unrelated
