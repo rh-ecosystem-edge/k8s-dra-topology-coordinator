@@ -11,7 +11,6 @@ import (
 	"text/tabwriter"
 
 	resourcev1 "k8s.io/api/resource/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
@@ -47,13 +46,11 @@ func runExplain(ctx context.Context, client kubernetes.Interface, w io.Writer, n
 	if err := checkFormat(format); err != nil {
 		return err
 	}
-	classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
-		LabelSelector: controller.LabelManaged + "=true",
-	})
+	classes, err := loadManagedClasses(ctx, client)
 	if err != nil {
-		return fmt.Errorf("failed to list DeviceClasses: %w", err)
+		return err
 	}
-	for _, dc := range classes.Items {
+	for _, dc := range classes {
 		if dc.Name != name {
 			continue
 		}

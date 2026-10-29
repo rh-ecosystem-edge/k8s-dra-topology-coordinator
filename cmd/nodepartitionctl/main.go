@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -110,13 +111,21 @@ func newClient() (kubernetes.Interface, error) {
 }
 
 func loadEntries(ctx context.Context, client kubernetes.Interface) ([]Entry, error) {
+	classes, err := loadManagedClasses(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	return buildEntries(classes), nil
+}
+
+func loadManagedClasses(ctx context.Context, client kubernetes.Interface) ([]resourcev1.DeviceClass, error) {
 	classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{
 		LabelSelector: controller.LabelManaged + "=true",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list DeviceClasses: %w", err)
 	}
-	return buildEntries(classes.Items), nil
+	return classes.Items, nil
 }
 
 func runList(ctx context.Context, client kubernetes.Interface, w io.Writer, all bool, format string) error {
@@ -151,33 +160,60 @@ func runGet(ctx context.Context, client kubernetes.Interface, w io.Writer, name,
 	if err := checkFormat(format); err != nil {
 		return err
 	}
-	entries, err := loadEntries(ctx, client)
+	classes, err := loadManagedClasses(ctx, client)
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if e.Name != name {
-			continue
-		}
+	entry, ok := entryForName(classes, name)
+	if ok {
 		if format == "json" {
-			return writeJSON(w, e)
+			return writeJSON(w, entry)
 		}
 		return writeTable(w, [][]string{
-			{"Name:", e.Name},
-			{"Kind:", e.Kind},
-			{"Display name:", dash(e.DisplayName)},
-			{"Description:", dash(e.Description)},
-			{"Intent level:", dash(e.IntentLevel)},
-			{"Visibility:", dash(e.Visibility)},
-			{"Categories:", dash(strings.Join(e.Categories, ", "))},
-			{"Workload types:", dash(strings.Join(e.WorkloadTypes, ", "))},
-			{"Mode:", dash(e.Mode)},
-			{"Alignment:", dash(e.Alignment)},
-			{"Count:", strconv.Itoa(e.Count)},
-			{"Variants:", dash(strings.Join(e.Variants, ", "))},
+			{"Name:", entry.Name},
+			{"Kind:", entry.Kind},
+			{"Display name:", dash(entry.DisplayName)},
+			{"Description:", dash(entry.Description)},
+			{"Intent level:", dash(entry.IntentLevel)},
+			{"Visibility:", dash(entry.Visibility)},
+			{"Categories:", dash(strings.Join(entry.Categories, ", "))},
+			{"Workload types:", dash(strings.Join(entry.WorkloadTypes, ", "))},
+			{"Mode:", dash(entry.Mode)},
+			{"Alignment:", dash(entry.Alignment)},
+			{"Count:", strconv.Itoa(entry.Count)},
+			{"Variants:", dash(strings.Join(entry.Variants, ", "))},
 		})
 	}
 	return fmt.Errorf("no managed DeviceClass %q found", name)
+}
+
+func entryForName(classes []resourcev1.DeviceClass, name string) (Entry, bool) {
+	for _, entry := range buildEntries(classes) {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+
+	aggregateKinds := make(map[string]string)
+	for _, dc := range classes {
+		if dc.Labels[controller.LabelManaged] != "true" || dc.Labels[controller.LabelAggregate] != "true" {
+			continue
+		}
+		if grouping := dc.Labels[controller.LabelGrouping]; grouping != "" {
+			aggregateKinds[grouping] = groupingKind(dc)
+		}
+	}
+	for _, dc := range classes {
+		if dc.Name != name || dc.Labels[controller.LabelManaged] != "true" || dc.Labels[controller.LabelGrouping] == "" {
+			continue
+		}
+		kind := groupingKind(dc)
+		if aggregateKind, ok := aggregateKinds[dc.Labels[controller.LabelGrouping]]; ok {
+			kind = aggregateKind
+		}
+		return newEntry(dc, kind), true
+	}
+	return Entry{}, false
 }
 
 func writeTable(w io.Writer, rows [][]string) error {

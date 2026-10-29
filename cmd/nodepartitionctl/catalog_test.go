@@ -51,9 +51,13 @@ func fixtureClasses() []resourcev1.DeviceClass {
 				controller.AnnotationCategories:  "ai,inference",
 			}),
 		class("gpu-inference-rail0", managed(
-			controller.LabelGrouping, "gpu-inference", controller.LabelSource, controller.SourceConfigMap), nil),
+			controller.LabelGrouping, "gpu-inference", controller.LabelSource, controller.SourceConfigMap,
+			controller.LabelMode, "container", controller.LabelAlignment, "pcieRoot",
+			controller.LabelCount, "1"), nil),
 		class("gpu-inference-rail1", managed(
-			controller.LabelGrouping, "gpu-inference", controller.LabelSource, controller.SourceConfigMap), nil),
+			controller.LabelGrouping, "gpu-inference", controller.LabelSource, controller.SourceConfigMap,
+			controller.LabelMode, "container", controller.LabelAlignment, "pcieRoot",
+			controller.LabelCount, "1"), nil),
 		class("plain", managed(
 			controller.LabelGrouping, "plain", controller.LabelAggregate, "true",
 			controller.LabelSource, controller.SourceConfigMap), nil),
@@ -197,6 +201,31 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 	assert.NotContains(t, encoded.String(), "secret")
 }
 
+func TestRunExplainAcceptsTopologyVariant(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("gpu-inference-rail0", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "gpu-inference",
+		controller.LabelMode:      "container",
+		controller.LabelAlignment: "pcieRoot",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [{"deviceClass":"dra.gpu","sourceDriver":"dra.gpu","count":1}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var encoded bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &encoded, "gpu-inference-rail0", "json"))
+	var contract Contract
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &contract))
+	assert.Equal(t, "gpu-inference-rail0", contract.Name)
+	assert.Equal(t, "container", contract.Mode)
+	assert.Equal(t, "pcieRoot", contract.Alignment)
+}
+
 func TestRunExplainRejectsMissingPartitionConfig(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	dc := class("plain", map[string]string{
@@ -268,6 +297,17 @@ func TestRunGet(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, runGet(context.Background(), client, &buf, "gpu-full", "table"))
 	assert.Contains(t, buf.String(), kindPartition)
+
+	var variant bytes.Buffer
+	require.NoError(t, runGet(context.Background(), client, &variant, "gpu-inference-rail0", "json"))
+	var got Entry
+	require.NoError(t, json.Unmarshal(variant.Bytes(), &got))
+	assert.Equal(t, "gpu-inference-rail0", got.Name)
+	assert.Equal(t, kindOffering, got.Kind)
+	assert.Equal(t, 1, got.Count)
+	assert.Equal(t, "container", got.Mode)
+	assert.Equal(t, "pcieRoot", got.Alignment)
+	assert.Empty(t, got.Variants)
 
 	err := runGet(context.Background(), client, &buf, "missing", "table")
 	require.ErrorContains(t, err, `no managed DeviceClass "missing"`)
