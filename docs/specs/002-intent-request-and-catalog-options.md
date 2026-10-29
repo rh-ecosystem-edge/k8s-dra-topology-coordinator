@@ -38,7 +38,7 @@ The coordinator guarantees that an offering name identifies the aggregate class,
 Required work:
 
 - document aggregate DeviceClass names as the stable request target;
-- add an explicit `nodepartition.dra.k8s.io/offering=true` label to distinguish curated offerings from fixed and auto-detected classes. Today `IsOffering()` (`internal/controller/grouping.go`) infers offering status from any metadata field, and `applyIntentMetadata` writes only the `intent-level` and `visibility` labels. The new label must come from explicit configuration, not be re-derived from `IsOffering()`;
+- add an explicit `nodepartition.dra.k8s.io/offering=true` label to distinguish curated offerings from other grouping classes, auto-detected groupings, and fixed partition classes. Today `IsOffering()` (`internal/controller/grouping.go`) infers offering status from any metadata field, and `applyIntentMetadata` writes only the `intent-level` and `visibility` labels. The new label must come from explicit configuration, not be re-derived from `IsOffering()`;
 - add an explicit aggregate marker label. Aggregate classes are currently identified only by the absence of the `numa` and `railIndex` labels, which a resolver should not rely on;
 - keep the existing webhook unchanged; and
 - provide a CLI/catalog command that resolves metadata to the DeviceClass name.
@@ -56,7 +56,7 @@ Limitations:
 - offering selection is still based on a class name; and
 - intent metadata remains descriptive unless additional policy is added.
 
-Stable names need collision rules. The aggregate class name is derived with `sanitizeForName(GroupingName)` in `internal/controller/deviceclass_manager.go`, so two groupings can sanitize to the same name. The controller must detect the collision and reject or disambiguate it rather than let one offering shadow another.
+Stable names need collision rules. The aggregate class name is derived with `sanitizeForName(GroupingName)` in `internal/controller/deviceclass_manager.go`, so two groupings can sanitize to the same name. The controller already fails reconcile on sanitized-name collisions and on overlap between aggregate and per-instance class names. It did not fail on two ConfigMaps that define the same raw `data.name`: it logged the duplicate, and `mergeGroupings` kept an arbitrary one per reconcile, so the owning ConfigMap could change between reconciles. A stable offering name needs exactly one owner, so duplicates must fail reconcile and publish nothing until fixed. Partition and grouping classes also share one DeviceClass namespace, so publication must refuse to overwrite a class owned by the other path.
 
 ### Option B: Offering references on native DRA objects
 
@@ -180,17 +180,20 @@ The output should include:
 - readiness or availability information; and
 - the entry kind (see below).
 
-The catalog lists every class the coordinator manages (`managed=true`), not only curated offerings, so users can discover fixed and auto-detected classes too. Each entry has a `kind`, derived from existing labels:
+The catalog lists every class the coordinator manages (`managed=true`), not only curated offerings, so users can discover auto-detected and fixed classes too. Each entry has a `kind`, derived from the labels the controller publishes:
 
 | Kind | Source | Labels |
 | --- | --- | --- |
-| `offering` | aggregate class of a grouping that carries the explicit offering label | `managed=true`, `grouping`, `offering=true` |
-| `grouping` | aggregate class of a grouping without the offering label | `managed=true`, `grouping` |
-| `partition` | class the controller builds from detected topology | `managed=true`, `partitionType` |
+| `offering` | aggregate class of a ConfigMap grouping that sets `offering: "true"` | `managed=true`, `grouping`, `aggregate=true`, `offering=true` |
+| `grouping` | aggregate class of any other ConfigMap grouping | `managed=true`, `grouping`, `aggregate=true`, `source=configmap` |
+| `auto-detected` | aggregate class of a grouping the coordinator derives from PCIe pairings | `managed=true`, `grouping`, `aggregate=true`, `source=auto` |
+| `partition` | fixed-hierarchy class the controller builds from detected topology | `managed=true`, `partitionType` |
 
-By default `offerings list` shows `offering` entries only. `--all` adds the other kinds, and `offerings get <name>` works for any kind.
+Per-instance grouping classes (no `aggregate` label) are not entries. They are listed as `variants` of their aggregate.
 
-Only `offering` entries carry the stable-name, collision-check, and annotation-resolution guarantees. The names of `grouping` and `partition` classes can change when topology or driver attributes change, so the catalog marks them informational and does not present them as stable request targets. They are not resolvable through the Option B offering annotation.
+By default `offerings list` shows `offering` entries only. `--all` adds the other kinds, and `offerings get <name>` works for any entry.
+
+Only `offering` entries carry the stable-name, collision-check, and annotation-resolution guarantees. The names of `grouping`, `auto-detected`, and `partition` classes can change when topology or driver attributes change, so the catalog marks them informational and does not present them as stable request targets. They are not resolvable through the Option B offering annotation.
 
 A DeviceClass has no status. The `count` label gives a static instance count; live availability requires reading ResourceSlices and allocated ResourceClaims. Either name those sources as a requirement or leave availability out of the first version.
 
@@ -252,6 +255,8 @@ Existing ConfigMaps should remain supported as a compatibility source. Both Conf
 
 ## Recommended progression
 
+Steps 1 and 2 are implemented in the pull request that adds `nodepartitionctl`: the explicit `offering` key, the `aggregate`, `mode`, and `source` labels, failing reconcile on duplicate grouping names, the cross-kind publish guard, and the `offerings list|get` CLI.
+
 1. Make aggregate offering names stable, collision-checked, and explicitly labeled.
 2. Add a catalog CLI using the labeled aggregate DeviceClasses.
 3. Add offering-reference resolution to native `ResourceClaim` and `ResourceClaimTemplate` admission, if names that differ from class names are needed.
@@ -286,4 +291,4 @@ This sequence keeps the existing `PartitionConfig` and webhook expansion path in
 - How offerings are renamed or versioned without breaking existing claims.
 - Whether to mutate templates at admission or teach the Pod and VMI handlers the resolver.
 - Whether `firstAvailable` subrequests are supported.
-- Whether `grouping` and `partition` entries should be hidden from the default catalog view or shown alongside offerings.
+- Whether `grouping`, `auto-detected`, and `partition` entries should be hidden from the default catalog view or shown alongside offerings.
