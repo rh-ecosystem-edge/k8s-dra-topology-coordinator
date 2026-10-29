@@ -158,8 +158,8 @@ func writeContractTable(w io.Writer, contract Contract) error {
 	for _, row := range [][]string{
 		{"Name:", contract.Name},
 		{"Kind:", contract.Kind},
-		{"Mode:", dash(contract.Mode)},
-		{"Alignment:", dash(contract.Alignment)},
+		{"Offering mode:", dash(contract.Mode)},
+		{"Topology alignment:", emptyValue(contract.Alignment)},
 	} {
 		if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
 			return err
@@ -170,17 +170,17 @@ func writeContractTable(w io.Writer, contract Contract) error {
 	}
 	for _, request := range contract.Requests {
 		capacity := formatCapacity(request.Capacity)
-		passthrough := "-"
+		passthrough := "no"
 		if request.Passthrough {
-			passthrough = "true"
+			passthrough = "yes"
 		}
 		rows := [][]string{
-			{"  DeviceClass:", request.DeviceClass},
+			{"  Requested class:", request.DeviceClass},
 			{"    Source driver:", dash(request.SourceDriver)},
 			{"    Count:", strconv.Itoa(request.Count)},
-			{"    Capacity:", capacity},
-			{"    Passthrough:", passthrough},
-			{"    Partition mode:", dash(request.PartitionMode)},
+			{"    Capacity request:", emptyValue(capacity)},
+			{"    VM passthrough:", passthrough},
+			{"    GPU partition profile:", emptyValue(request.PartitionMode)},
 		}
 		for _, row := range rows {
 			if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
@@ -200,6 +200,13 @@ func writeContractTable(w io.Writer, contract Contract) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func emptyValue(value string) string {
+	if value == "" || value == "-" {
+		return "none"
+	}
+	return value
 }
 
 func formatCapacity(capacity map[string]string) string {

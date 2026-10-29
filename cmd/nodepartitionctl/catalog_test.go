@@ -173,10 +173,14 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 
 	var table bytes.Buffer
 	require.NoError(t, runExplain(context.Background(), client, &table, "storage-network", "table"))
-	assert.Contains(t, table.String(), "DeviceClass:")
+	assert.Contains(t, table.String(), "Requested class:")
 	assert.Contains(t, table.String(), "Source driver:")
 	assert.Contains(t, table.String(), "dra.nvme")
-	assert.Contains(t, table.String(), "Alignment:")
+	assert.Contains(t, table.String(), "Offering mode:")
+	assert.Contains(t, table.String(), "Topology alignment:")
+	assert.Contains(t, table.String(), "Capacity request:")
+	assert.Contains(t, table.String(), "VM passthrough:")
+	assert.Contains(t, table.String(), "GPU partition profile:")
 	assert.Contains(t, table.String(), "numaNode")
 	assert.NotContains(t, table.String(), "secret")
 
