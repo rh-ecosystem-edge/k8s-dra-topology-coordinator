@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
@@ -122,6 +124,111 @@ func TestRunList_NeverPrintsClassConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
 	require.Len(t, got, 1)
 	assert.Equal(t, kindOffering, got[0].Kind)
+}
+
+func TestRunListTableCompactsWideColumns(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	longName := "dra-cpu-dra-memory-dra-nvme-mock-accel-example-com-sriovnetwork-pcieroot-numa0-loose"
+	dc := class(longName, map[string]string{
+		controller.LabelManaged:       "true",
+		controller.LabelPartitionType: "numa",
+	}, nil)
+	dc.Annotations = map[string]string{controller.AnnotationDisplayName: "A very long display name for a topology partition"}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	require.NoError(t, runList(context.Background(), client, &buf, true, "table"))
+
+	output := buf.String()
+	assert.NotContains(t, output, longName)
+	assert.Contains(t, output, "…")
+	assert.Contains(t, strings.Split(output, "\n")[0], "VISIBILITY  MODE")
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		assert.LessOrEqual(t, len([]rune(line)), 140, "table row is too wide: %q", line)
+	}
+}
+
+func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("storage-network", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "storage-network",
+		controller.LabelAggregate: "true",
+		controller.LabelOffering:  "true",
+		controller.LabelMode:      "container",
+		controller.LabelAlignment: "numaNode",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [
+    {"deviceClass":"dra.nvme","sourceDriver":"dra.nvme","count":1},
+    {"deviceClass":"sriovnetwork.k8snetworkplumbingwg.io","sourceDriver":"sriovnetwork.k8snetworkplumbingwg.io","count":1,"selectors":["device.attributes.secret == 'hidden'"]}
+  ],
+  "alignments": [{"attribute":"resource.kubernetes.io/numaNode","requests":["dra.nvme","sriovnetwork.k8snetworkplumbingwg.io"],"enforcement":"required"}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var table bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &table, "storage-network", "table"))
+	assert.Contains(t, table.String(), "DeviceClass:")
+	assert.Contains(t, table.String(), "Source driver:")
+	assert.Contains(t, table.String(), "dra.nvme")
+	assert.Contains(t, table.String(), "Alignment:")
+	assert.Contains(t, table.String(), "numaNode")
+	assert.NotContains(t, table.String(), "secret")
+
+	var encoded bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &encoded, "storage-network", "json"))
+	var contract Contract
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &contract))
+	assert.Equal(t, "storage-network", contract.Name)
+	assert.Equal(t, "container", contract.Mode)
+	assert.Equal(t, "numaNode", contract.Alignment)
+	require.Len(t, contract.Requests, 2)
+	assert.Equal(t, "dra.nvme", contract.Requests[0].DeviceClass)
+	assert.Equal(t, "required", contract.Alignments[0].Enforcement)
+	assert.NotContains(t, encoded.String(), "secret")
+}
+
+func TestRunExplainRejectsMissingPartitionConfig(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("plain", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "plain",
+		controller.LabelAggregate: "true",
+	}, nil)
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = runExplain(context.Background(), client, &buf, "plain", "table")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `managed DeviceClass "plain" has no PartitionConfig`)
+}
+
+func TestRunExplainRejectsUnsupportedPartitionConfigVersion(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("future", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "future",
+		controller.LabelAggregate: "true",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "apiVersion": "nodepartition.dra.k8s.io/v2",
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [{"deviceClass":"dra.nvme","count":1}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	err = runExplain(context.Background(), client, &buf, "future", "table")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `managed DeviceClass "future" has unsupported PartitionConfig apiVersion "nodepartition.dra.k8s.io/v2"`)
 }
 
 func TestRunGet(t *testing.T) {

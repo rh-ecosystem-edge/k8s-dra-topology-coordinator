@@ -74,7 +74,19 @@ func newRootCmd() *cobra.Command {
 			return runGet(cmd.Context(), client, cmd.OutOrStdout(), args[0], output)
 		},
 	}
-	offerings.AddCommand(list, get)
+	explain := &cobra.Command{
+		Use:   "explain NAME",
+		Short: "Explain the normalized hardware request contract",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			return runExplain(cmd.Context(), client, cmd.OutOrStdout(), args[0], output)
+		},
+	}
+	offerings.AddCommand(list, get, explain)
 	root.AddCommand(offerings)
 	return root
 }
@@ -125,8 +137,9 @@ func runList(ctx context.Context, client kubernetes.Interface, w io.Writer, all 
 	}
 	rows := [][]string{{"NAME", "KIND", "DISPLAY NAME", "INTENT", "VISIBILITY", "MODE", "ALIGNMENT", "COUNT", "VARIANTS"}}
 	for _, e := range entries {
-		rows = append(rows, []string{e.Name, e.Kind, dash(e.DisplayName), dash(e.IntentLevel), dash(e.Visibility),
-			dash(e.Mode), dash(e.Alignment), strconv.Itoa(e.Count), strconv.Itoa(len(e.Variants))})
+		rows = append(rows, []string{compact(e.Name, 34), compact(e.Kind, 13), compact(dash(e.DisplayName), 32),
+			compact(dash(e.IntentLevel), 16), compact(dash(e.Visibility), 10), compact(dash(e.Mode), 11),
+			compact(dash(e.Alignment), 10), strconv.Itoa(e.Count), strconv.Itoa(len(e.Variants))})
 	}
 	return writeTable(w, rows)
 }
@@ -172,6 +185,19 @@ func writeTable(w io.Writer, rows [][]string) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func compact(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(runes[:max])
+	}
+	left := (max - 1) / 2
+	right := max - 1 - left
+	return string(runes[:left]) + "…" + string(runes[len(runes)-right:])
 }
 
 func checkFormat(format string) error {

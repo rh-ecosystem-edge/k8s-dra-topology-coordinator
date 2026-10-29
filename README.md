@@ -340,9 +340,13 @@ Every grouping DeviceClass also carries `nodepartition.dra.k8s.io/mode` (`contai
 nodepartitionctl offerings list            # curated offerings only
 nodepartitionctl offerings list --all      # plus grouping, auto-detected, and partition classes
 nodepartitionctl offerings get gpu-inference -o json
+nodepartitionctl offerings explain gpu-inference
+nodepartitionctl offerings explain gpu-inference -o json
 ```
 
 Entries have a `kind`: `offering` (aggregate class with `offering=true`), `grouping` (any other ConfigMap grouping), `auto-detected` (coordinator-derived PCIe pairing), or `partition` (fixed-hierarchy class). Per-instance classes appear as `variants` of their aggregate. Output never includes class selectors or opaque driver configuration. Names of `grouping`, `auto-detected`, and `partition` entries can change with topology, so only `offering` entries are stable request targets.
+
+`offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, mode, alignment, source driver, requested device class, count, capacity, passthrough flag, partition mode, and configured alignment rules. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract.
 
 `categories` and `workloadTypes` are comma-joined annotations, so Kubernetes label selectors cannot query those values. Intent metadata currently supports discovery and cataloging only; request-level claim rejection based on categories or workload types is deferred, and the webhook expands claims from the DeviceClass scheduling configuration independently of these annotations.
 
