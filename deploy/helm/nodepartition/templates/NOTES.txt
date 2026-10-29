@@ -17,6 +17,22 @@ List generated partition and grouping classes:
 
   kubectl get deviceclasses -l nodepartition.dra.k8s.io/managed=true
 
+Topology-rule and device-grouping ConfigMaps are trusted in
+{{ .Values.controller.configNamespace | default .Release.Namespace }} by default.
+Set `controller.watchAllNamespaces=true` only when every namespace that can
+create a labeled ConfigMap is trusted.
+
+The webhook fails closed for ResourceClaim transport errors and uses best-effort
+transport handling for Pod and VMI rewrites. Metrics are available at
+`http://<controller-pod>:{{ .Values.controller.healthPort }}/metrics` while
+`controller.metrics.enabled=true`.
+
+If running more than one coordinator release in a cluster, use a unique
+`driverName`, non-conflicting grouping names, and a unique
+`controller.leaderElection.id` value.
+DeviceClasses are cluster-scoped; changing `driverName` requires removing the
+old release's managed classes before installing under the new identity.
+
 The default TLS mode uses cert-manager and expects the configured
 {{ .Values.controller.webhook.tls.certManager.issuerKind }}
 {{ .Values.controller.webhook.tls.certManager.issuerName }} to already exist.

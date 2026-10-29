@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Historical status:** Implemented and merged. The unchecked boxes below are
+> preserved as the original execution trace; use the current README, E2E guides,
+> and harness test plan for operational instructions. Later changes added
+> explicit rails, passthrough modes, versioned contracts, HA admission
+> consistency, and custom driver identity beyond this plan's scope.
+
 **Goal:** Add optional intent metadata to user-defined device groupings and publish it on their aggregate DeviceClasses for discovery.
 
 **Architecture:** Parse and validate the six optional ConfigMap fields into `DeviceGrouping.Intent`, deep-copy them through the grouping store, and carry them through `GroupingInstance`. Add labels and annotations only when building the aggregate DeviceClass; keep the per-rail classes and webhook claim expansion unchanged. Extend the existing controller collision checks, reconciliation tests, README grouping docs, and examples.
@@ -172,7 +178,7 @@ State that `categories` and `workloadTypes` are comma-joined annotations and can
 - [ ] **Step 3: Run `make test`** for unit and envtest coverage. Report environment/setup failures accurately.
 - [ ] **Step 4: Run `make lint` if `golangci-lint` is available; otherwise report it as unavailable.**
 - [ ] **Step 5: Review the final diff** for unchanged webhook production code, aggregate-only metadata, no accidental changes to sanitizer behavior, and all three example labels.
-- [ ] **Step 6: Report E2E as not run** unless the Vagrant cluster and external mock-device driver are available.
+- [ ] **Step 6: Report the E2E lane actually executed.** The direct suite requires the external mock-device environment; the coordinator bridge can run under `k8s-dra-harness` with its own adapter and evidence boundary.
 - [ ] **Step 7: Report the six optional ConfigMap keys, a generated DeviceClass metadata example, discovery commands, test results, backward compatibility, and the known request-level rejection, stale-cache, and E2E limitations.**
 
 ## Plan Adjustments and Risks
@@ -183,7 +189,7 @@ State that `categories` and `workloadTypes` are comma-joined annotations and can
 - The architect flagged character-count semantics as unspecified. The user confirmed Unicode code-point counting; tests pin that choice with multibyte input.
 - The architect found the prior collision-suppression proposal could delete existing managed DeviceClasses through normal cleanup. The user confirmed the revised policy: return before grouping publication, preserving prior classes and delaying all grouping updates until the conflict is fixed.
 - Parser tests must assert that invalid values identify both the offending field and source ConfigMap. Collision diagnostics must identify `data.name`, raw/sanitized names, and source ConfigMaps.
-- Full E2E requires external mock-device/Vagrant infrastructure and is not part of local verification by default.
+- Direct full E2E remains environment-dependent; the harness bridge provides a separate hardware-free and hardware-backed execution path. Local unit/envtest results must not be reported as real-driver allocation evidence.
 - Final review found that distinct valid grouping names can still collide after per-rail suffixes are added; the plan now checks actual satisfied output names before manager sync.
 
 ## Architect Review

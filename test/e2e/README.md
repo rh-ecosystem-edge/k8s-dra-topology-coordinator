@@ -15,6 +15,17 @@ The live suite exercises the coordinator against a real Kubernetes API server. I
 
 The suite refuses to run unless `E2E_DISPOSABLE_CLUSTER=1` (or `true`/`yes`) is set. This is required because `DeviceClass` and admission configurations are cluster-scoped.
 
+This direct suite uses the repository's mock-device and optional CPU-driver
+fixtures. For runs where `k8s-dra-harness` owns driver installation and
+workloads, use the coordinator bridge in
+[`harness/README.md`](harness/README.md) instead. The bridge is the preferred
+path for coordinator catalog smoke checks and shared evidence. The current
+bridge does not yet create workload claims, verify allocation status, inspect
+CDI/VFIO state, or prove driver cleanup. Synthetic ResourceSlices remain useful
+for catalog publication, while admission coverage comes from this direct suite
+or future bridge probes. Synthetic fixtures do not prove VFIO binding; use the
+hardware and allocation lanes in the harness test plan for that evidence.
+
 ## Run
 
 ```sh
@@ -51,6 +62,11 @@ go test -tags=e2e ./test/e2e -count=1
 ```
 
 Without `E2E_KUBECONFIG`, live tests skip instead of mutating a developer cluster.
+
+The bridge's `--validate-only` mode checks its contract without contacting a
+cluster. Its normal mode creates a run-owned coordinator namespace, Helm
+release, fixtures, and evidence directory, then removes only those resources
+unless `--keep-resources` is set.
 
 ## Coverage profiles
 
