@@ -17,6 +17,10 @@ List generated partition and grouping classes:
 
   kubectl get deviceclasses -l nodepartition.dra.k8s.io/managed=true
 
+List curated offerings (aggregate classes with `offering: "true"`):
+
+  kubectl get deviceclasses -l nodepartition.dra.k8s.io/offering=true
+
 Topology-rule and device-grouping ConfigMaps are trusted in
 {{ .Values.controller.configNamespace | default .Release.Namespace }} by default.
 Set `controller.watchAllNamespaces=true` only when every namespace that can

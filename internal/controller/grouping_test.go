@@ -1102,3 +1102,39 @@ func TestGroupingBuilder_InstanceIndexDeterministic(t *testing.T) {
 		assert.True(t, results1[0].Instances[i].Rail)
 	}
 }
+
+func TestParseDeviceGrouping_OfferingFlag(t *testing.T) {
+	tests := map[string]struct {
+		value   string
+		want    bool
+		wantErr string
+	}{
+		"absent": {value: "", want: false},
+		"true":   {value: "true", want: true},
+		"false":  {value: "false", want: false},
+		"bad":    {value: "yes please", wantErr: `invalid offering "yes please"`},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			data := validGroupingData("test")
+			if tt.value != "" {
+				data["offering"] = tt.value
+			}
+			grouping, err := parseDeviceGrouping(makeGroupingConfigMap("test", data))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, grouping.Intent.Offering)
+		})
+	}
+}
+
+func TestParseDeviceGrouping_OfferingFlagIsNotInferredFromMetadata(t *testing.T) {
+	data := validGroupingData("test")
+	data["displayName"] = "GPU inference"
+	grouping, err := parseDeviceGrouping(makeGroupingConfigMap("test", data))
+	require.NoError(t, err)
+	assert.False(t, grouping.Intent.Offering)
+}

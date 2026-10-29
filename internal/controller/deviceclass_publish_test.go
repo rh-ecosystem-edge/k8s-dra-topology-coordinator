@@ -84,3 +84,21 @@ func TestCleanupStale_SkipsOtherDriversClasses(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"other-part", "other-group"}, names)
 }
+
+func TestPublishDeviceClass_RefusesCrossKindOverwrite(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("grouping over partition", func(t *testing.T) {
+		client := fake.NewSimpleClientset(testDC("x", "drv", managedLabels("partitionType", "full"), "false"))
+		m := NewDeviceClassManager(client, "drv", NewTopologyRuleStore())
+		err := m.publishDeviceClass(ctx, testDC("x", "drv", managedLabels("grouping", "x"), "true"))
+		require.ErrorContains(t, err, "partition class")
+	})
+
+	t.Run("partition over grouping", func(t *testing.T) {
+		client := fake.NewSimpleClientset(testDC("x", "drv", managedLabels("grouping", "x"), "false"))
+		m := NewDeviceClassManager(client, "drv", NewTopologyRuleStore())
+		err := m.publishDeviceClass(ctx, testDC("x", "drv", managedLabels("partitionType", "full"), "true"))
+		require.ErrorContains(t, err, "grouping class")
+	})
+}

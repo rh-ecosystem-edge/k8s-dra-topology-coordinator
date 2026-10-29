@@ -77,8 +77,8 @@ func init() {
 	rootCmd.Flags().StringVar(&driverName, "driver-name", "nodepartition.dra.k8s.io",
 		"DRA driver name used in generated DeviceClass selectors and opaque config")
 	rootCmd.Flags().StringVar(&partitionMode, "partition-mode", "auto",
-		`Partition strategy: "auto" (groupings if ConfigMaps exist in --config-namespace, else fixed partitions), `+
-			`"partitions" (always fixed hierarchy), or "groupings" (always admin-defined groupings)`)
+		`Partition strategy: "auto" (fixed partitions and groupings, including auto-detected PCIe pairings), `+
+			`"partitions" (fixed hierarchy only), or "groupings" (groupings only)`)
 	rootCmd.Flags().DurationVar(&shutdownTimeout, "shutdown-timeout",
 		defaultShutdownTimeoutSec*time.Second, "Maximum time to wait for graceful shutdown")
 	rootCmd.Flags().StringVar(&leaderElectionNamespace, "leader-election-namespace", "kube-system",

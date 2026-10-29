@@ -401,6 +401,7 @@ func TestE2EGroupingAndIntentLifecycle(t *testing.T) {
 			"categories":    "ai,inference",
 			"workloadTypes": "serving",
 			"visibility":    "public",
+			"offering":      "true",
 			"devices":       "- class: mock-accel.example.com\n  count: 1\n",
 		},
 	}
@@ -819,6 +820,8 @@ func assertIntentMetadata(t *testing.T, class *resourcev1.DeviceClass) {
 	assert.Equal(t, "E2E grouping", class.Annotations[controller.CoordinatorDriverName+"/display-name"])
 	assert.Equal(t, "ai,inference", class.Annotations[controller.CoordinatorDriverName+"/categories"])
 	assert.Equal(t, "serving", class.Annotations[controller.CoordinatorDriverName+"/workload-types"])
+	assert.Equal(t, "true", class.Labels[controller.LabelOffering])
+	assert.Equal(t, "true", class.Labels[controller.LabelAggregate])
 	config := partitionConfigFromDeviceClass(t, class)
 	assert.Equal(t, controller.OfferingModeContainer, config.Mode)
 }

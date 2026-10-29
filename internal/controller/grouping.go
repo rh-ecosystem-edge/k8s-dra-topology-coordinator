@@ -76,6 +76,10 @@ type IntentMetadata struct {
 	Categories    []string
 	WorkloadTypes []string
 	Visibility    string
+	// Offering marks the grouping as a curated, stable offering. It is set
+	// explicitly through the "offering" ConfigMap key and never inferred from
+	// the other metadata.
+	Offering bool
 }
 
 // IsOffering reports whether the grouping has any intent metadata.
@@ -103,6 +107,9 @@ type DeviceGrouping struct {
 	Devices []GroupingDevice
 	// Intent contains optional offering metadata from the source ConfigMap.
 	Intent IntentMetadata
+	// AutoDetected marks groupings the coordinator derives from topology
+	// rather than loads from a ConfigMap.
+	AutoDetected bool
 
 	sourceConfigMap string
 }
@@ -197,6 +204,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 			Rail:            g.Rail,
 			Devices:         devicesCopy,
 			Intent:          intentCopy,
+			AutoDetected:    g.AutoDetected,
 			sourceConfigMap: g.sourceConfigMap,
 		})
 	}
@@ -206,8 +214,8 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 // knownGroupingKeys are the data keys parseDeviceGrouping reads.
 var knownGroupingKeys = map[string]struct{}{
 	"alignment": {}, "categories": {}, "description": {}, "devices": {}, "displayName": {},
-	"fallback": {}, "intentLevel": {}, "mode": {}, "name": {}, "rail": {},
-	"visibility": {}, "workloadTypes": {},
+	"fallback": {}, "intentLevel": {}, "mode": {}, "name": {}, "offering": {},
+	"rail": {}, "visibility": {}, "workloadTypes": {},
 }
 
 func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
@@ -281,6 +289,13 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		default:
 			return g, fmt.Errorf("invalid visibility %q: must be public or internal", intent.Visibility)
 		}
+	}
+	if offering := cm.Data["offering"]; offering != "" {
+		parsed, err := strconv.ParseBool(offering)
+		if err != nil {
+			return g, fmt.Errorf("invalid offering %q: must be true or false", offering)
+		}
+		intent.Offering = parsed
 	}
 	g.Intent = intent
 

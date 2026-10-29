@@ -150,9 +150,10 @@ func (b *PartitionBuilder) DetectPCIeRootPairings() []DeviceGrouping {
 					name := sanitizeDNSLabel(
 						sanitizeForName(classA) + "-" + sanitizeForName(classB) + "-pair")
 					groupings = append(groupings, DeviceGrouping{
-						Name:      name,
-						Alignment: "pcieRoot",
-						Fallback:  "numaNode",
+						Name:         name,
+						Alignment:    "pcieRoot",
+						Fallback:     "numaNode",
+						AutoDetected: true,
 						Devices: []GroupingDevice{
 							{Class: b.rules.GetDeviceClassForDriver(drivers[i]), Count: 1},
 							{Class: b.rules.GetDeviceClassForDriver(drivers[j]), Count: 1},
