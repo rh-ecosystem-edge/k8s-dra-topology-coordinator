@@ -340,6 +340,7 @@ Every grouping DeviceClass also carries `nodepartition.dra.k8s.io/mode` (`contai
 nodepartitionctl offerings list            # curated offerings only
 nodepartitionctl offerings list --all      # plus grouping, auto-detected, and partition classes
 nodepartitionctl offerings get gpu-inference -o json
+nodepartitionctl offerings get gpu-inference-rail0 -o json
 nodepartitionctl offerings explain gpu-inference
 nodepartitionctl offerings explain gpu-inference -o json
 ```
@@ -353,7 +354,7 @@ echo 'source <(nodepartitionctl completion bash)' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-`offerings get NAME` and `offerings explain NAME` dynamically complete managed catalog names from the cluster. Completion only needs the current kubeconfig identity to have `list` access to the cluster-scoped `deviceclasses` resource. If the API server is unavailable, completion returns no names.
+`offerings get NAME` and `offerings explain NAME` dynamically complete managed catalog and topology-specific variant names from the cluster. Completion only needs the current kubeconfig identity to have `list` access to the cluster-scoped `deviceclasses` resource. It is bounded to a short timeout, so an unavailable API server returns no names instead of blocking the shell. Variants are useful when a workload needs a particular topology shape, but their names can change after reconciliation.
 
 `offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, offering mode, topology alignment, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract; JSON field names remain stable (`mode`, `alignment`, and `partitionMode`).
 
@@ -423,6 +424,19 @@ docker build -t nodepartition-controller:dev .
 ```
 
 The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`. A source checkout does not publish an image automatically, so use the local-image override below when installing from source.
+
+Tagged releases also publish `nodepartitionctl` archives for Linux `amd64` and `arm64` on the GitHub Release page. Download the archive for your host, verify it with `checksums.txt`, and place the extracted binary on your `PATH`:
+
+```sh
+VERSION=0.1.0
+ARCH=amd64 # use arm64 on aarch64 hosts
+curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+tar -xzf "nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+mkdir -p ~/.local/bin
+install -m 0755 nodepartitionctl ~/.local/bin/nodepartitionctl
+```
 
 ## Helm installation
 
