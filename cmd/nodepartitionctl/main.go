@@ -63,9 +63,10 @@ func newRootCmd() *cobra.Command {
 	list.Flags().BoolVar(&showAll, "all", false,
 		"Include grouping, auto-detected, and partition classes, not only curated offerings")
 	get := &cobra.Command{
-		Use:   "get NAME",
-		Short: "Show one offering or managed class",
-		Args:  cobra.ExactArgs(1),
+		Use:               "get NAME",
+		Short:             "Show one offering or managed class",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: managedNameCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {
@@ -75,9 +76,10 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	explain := &cobra.Command{
-		Use:   "explain NAME",
-		Short: "Explain the normalized hardware request contract",
-		Args:  cobra.ExactArgs(1),
+		Use:               "explain NAME",
+		Short:             "Explain the normalized hardware request contract",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: managedNameCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {
@@ -88,6 +90,7 @@ func newRootCmd() *cobra.Command {
 	}
 	offerings.AddCommand(list, get, explain)
 	root.AddCommand(offerings)
+	root.InitDefaultCompletionCmd()
 	return root
 }
 

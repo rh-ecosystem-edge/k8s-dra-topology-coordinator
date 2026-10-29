@@ -346,6 +346,15 @@ nodepartitionctl offerings explain gpu-inference -o json
 
 Entries have a `kind`: `offering` (aggregate class with `offering=true`), `grouping` (any other ConfigMap grouping), `auto-detected` (coordinator-derived PCIe pairing), or `partition` (fixed-hierarchy class). Per-instance classes appear as `variants` of their aggregate. Output never includes class selectors or opaque driver configuration. Names of `grouping`, `auto-detected`, and `partition` entries can change with topology, so only `offering` entries are stable request targets.
 
+Enable shell completion with the generated Cobra script:
+
+```sh
+echo 'source <(nodepartitionctl completion bash)' >> ~/.bashrc
+source ~/.bashrc
+```
+
+`offerings get NAME` and `offerings explain NAME` dynamically complete managed catalog names from the cluster. Completion only needs the current kubeconfig identity to have `list` access to the cluster-scoped `deviceclasses` resource. If the API server is unavailable, completion returns no names.
+
 `offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, offering mode, topology alignment, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract; JSON field names remain stable (`mode`, `alignment`, and `partitionMode`).
 
 `categories` and `workloadTypes` are comma-joined annotations, so Kubernetes label selectors cannot query those values. Intent metadata currently supports discovery and cataloging only; request-level claim rejection based on categories or workload types is deferred, and the webhook expands claims from the DeviceClass scheduling configuration independently of these annotations.
