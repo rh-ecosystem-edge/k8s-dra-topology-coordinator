@@ -58,6 +58,9 @@ func runExplain(ctx context.Context, client kubernetes.Interface, w io.Writer, n
 		if err != nil {
 			return err
 		}
+		if entry, ok := entryForName(classes, name); ok {
+			contract.Kind = entry.Kind
+		}
 		if format == "json" {
 			return writeJSON(w, contract)
 		}

@@ -203,6 +203,12 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 
 func TestRunExplainAcceptsTopologyVariant(t *testing.T) {
 	client := fake.NewSimpleClientset()
+	aggregate := class("gpu-inference", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "gpu-inference",
+		controller.LabelAggregate: "true",
+		controller.LabelOffering:  "true",
+	}, nil)
 	dc := class("gpu-inference-rail0", map[string]string{
 		controller.LabelManaged:   "true",
 		controller.LabelGrouping:  "gpu-inference",
@@ -214,7 +220,9 @@ func TestRunExplainAcceptsTopologyVariant(t *testing.T) {
   "mode": "container",
   "subResources": [{"deviceClass":"dra.gpu","sourceDriver":"dra.gpu","count":1}]
 }`)}
-	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &aggregate, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
 	require.NoError(t, err)
 
 	var encoded bytes.Buffer
@@ -222,6 +230,7 @@ func TestRunExplainAcceptsTopologyVariant(t *testing.T) {
 	var contract Contract
 	require.NoError(t, json.Unmarshal(encoded.Bytes(), &contract))
 	assert.Equal(t, "gpu-inference-rail0", contract.Name)
+	assert.Equal(t, kindOffering, contract.Kind)
 	assert.Equal(t, "container", contract.Mode)
 	assert.Equal(t, "pcieRoot", contract.Alignment)
 }
