@@ -38,7 +38,8 @@ The coordinator guarantees that an offering name identifies the aggregate class,
 Required work:
 
 - document aggregate DeviceClass names as the stable request target;
-- add an explicit offering label to distinguish curated offerings from fixed and auto-detected classes;
+- add an explicit `nodepartition.dra.k8s.io/offering=true` label to distinguish curated offerings from fixed and auto-detected classes. Today `IsOffering()` (`internal/controller/grouping.go`) infers offering status from any metadata field, and `applyIntentMetadata` writes only the `intent-level` and `visibility` labels. The new label must come from explicit configuration, not be re-derived from `IsOffering()`;
+- add an explicit aggregate marker label. Aggregate classes are currently identified only by the absence of the `numa` and `railIndex` labels, which a resolver should not rely on;
 - keep the existing webhook unchanged; and
 - provide a CLI/catalog command that resolves metadata to the DeviceClass name.
 
@@ -54,6 +55,8 @@ Limitations:
 - users still know they are writing a DRA `ResourceClaim`;
 - offering selection is still based on a class name; and
 - intent metadata remains descriptive unless additional policy is added.
+
+Stable names need collision rules. The aggregate class name is derived with `sanitizeForName(GroupingName)` in `internal/controller/deviceclass_manager.go`, so two groupings can sanitize to the same name. The controller must detect the collision and reject or disambiguate it rather than let one offering shadow another.
 
 ### Option B: Offering references on native DRA objects
 
@@ -82,7 +85,16 @@ Resolution behavior:
 4. reject unknown, ambiguous, stale, or non-aggregate offerings; and
 5. leave ordinary native claims unchanged when no offering reference exists.
 
-This requires webhook coverage for both `resourceclaims` and `resourceclaimtemplates`. The Pod and VMI handlers should continue to consume the resolved native DRA objects rather than understand offering metadata themselves.
+This requires webhook coverage for both `resourceclaims` and `resourceclaimtemplates`, and template coverage must mutate, not only validate. Claims generated from a template are intercepted by the claim webhook, but the Pod and VMI handlers read the template's `deviceClassName` directly at Pod CREATE to compute the request renames. A placeholder class there yields no expansion mapping, so container `request:` names would not be rewritten while the generated claim is expanded, and the two would no longer match. Resolving the offering on template CREATE means the template, Pod, and claim paths all see the same resolved class, and the Pod and VMI handlers need no knowledge of offering metadata. ResourceClaim and ResourceClaimTemplate specs are immutable, so resolution is CREATE-only.
+
+Webhook behavior this option depends on:
+
+- **CREATE only.** The current rule also matches UPDATE. The resolver must ignore annotation changes on UPDATE. Separately, a claim created before its class became managed would receive an expansion patch on a later metadata update, which immutability rejects. Dropping UPDATE from the rule avoids both problems.
+- **Fail closed, and run first.** The claim path currently fails open: an unmarshal error is allowed, only `managedExpansionError` denies, and a missing DeviceClass is treated as pass-through. The resolver must run before `lookupPartitionConfig` and deny any object that carries an offering annotation but does not resolve.
+- **Placeholder class.** `deviceClassName` is required but its existence is not checked at admission. Publish a coordinator-owned sentinel DeviceClass whose CEL selector is `false`, so an unresolved claim can never allocate.
+- **`firstAvailable`.** `expandClaim` skips requests with `Exactly == nil`, so placeholders inside `firstAvailable` subrequests would stay unresolved. Reject them unless support is added.
+- **Reinvocation and idempotency.** The webhook sets no `reinvocationPolicy`, so it defaults to `Never`. Set `IfNeeded`, and have the resolver skip objects that already carry the audit annotation.
+- **Pod and VMI failure policy.** Both use `failurePolicy: Ignore`. If the webhook is down, a Pod that uses an offering-backed template is admitted without the rewrite and fails later.
 
 Advantages:
 
@@ -93,8 +105,15 @@ Advantages:
 Limitations:
 
 - annotations are less strongly typed than a CRD;
-- multiple offering references require a small annotation convention; and
-- the webhook must fail closed if the resolver cannot establish the offering.
+- multiple offering references require a small annotation convention;
+- the webhook must fail closed if the resolver cannot establish the offering; and
+- it adds value over Option A only when an offering name differs from its DeviceClass name (aliases, versioning, per-namespace mapping). If names stay one-to-one with classes, this is Option A with extra indirection.
+
+### Authorization and namespace scope
+
+DeviceClasses are cluster-scoped, and DRA does not restrict which namespaces may reference them. Any namespace can therefore bypass an offering by writing a `deviceClassName` directly, including the underlying driver classes. An offering reference is a convenience, not a boundary.
+
+To enforce a boundary, add an admission rule such as a ValidatingAdmissionPolicy. It runs after mutation, so it sees the resolved driver classes and must key on the audit annotation rather than the offering name. A per-DeviceClass ResourceQuota is the native alternative for limiting use. Either way, `visibility` alone is not authorization.
 
 ### Option C: Typed `IntentClaim` or `HardwareClaim` CRD
 
@@ -160,6 +179,8 @@ The output should include:
 - alignment and available topology-specific variants; and
 - readiness or availability information.
 
+A DeviceClass has no status. The `count` label gives a static instance count; live availability requires reading ResourceSlices and allocated ResourceClaims. Either name those sources as a requirement or leave availability out of the first version.
+
 Do not expose raw driver opaque configuration in the default human-facing output.
 
 This is the smallest catalog implementation and can be built directly on the current labels and annotations.
@@ -218,12 +239,13 @@ Existing ConfigMaps should remain supported as a compatibility source. Both Conf
 
 ## Recommended progression
 
-1. Define a normalized internal offering model shared by ConfigMaps and future APIs.
-2. Add a catalog CLI using aggregate DeviceClasses.
-3. Make aggregate offering names stable and explicitly labeled.
-4. Add offering-reference resolution to native `ResourceClaim` and `ResourceClaimTemplate` admission.
-5. Add a read-only authenticated catalog API only when an external portal needs it.
-6. Introduce `HardwareOffering` and `IntentClaim` CRDs if typed workload APIs, status, or multi-tenant ownership justify their cost.
+1. Make aggregate offering names stable, collision-checked, and explicitly labeled.
+2. Add a catalog CLI using the labeled aggregate DeviceClasses.
+3. Add offering-reference resolution to native `ResourceClaim` and `ResourceClaimTemplate` admission, if names that differ from class names are needed.
+4. Add a read-only authenticated catalog API only when an external portal needs it.
+5. Define a normalized internal offering model shared by ConfigMaps and `HardwareOffering`, then introduce `HardwareOffering` and `IntentClaim` CRDs if typed workload APIs, status, or multi-tenant ownership justify their cost.
+
+The CLI comes after labeling because it selects on the offering label. The normalized model is deferred because `DeviceGrouping` and `IntentMetadata` already serve the ConfigMap source and the admission resolver reads DeviceClass labels the webhook already fetches. A second source does not exist until the CRD step.
 
 This sequence keeps the existing `PartitionConfig` and webhook expansion path intact while progressively removing DeviceClass and topology knowledge from workload authors.
 
@@ -234,6 +256,7 @@ This sequence keeps the existing `PartitionConfig` and webhook expansion path in
 - Unknown or ambiguous offering references fail closed with an actionable error.
 - Offering resolution targets only aggregate, coordinator-managed DeviceClasses.
 - Repeated admission of the same object is idempotent.
+- An offering resolves identically at template, Pod, and claim admission.
 - Catalog responses expose user-facing metadata without leaking opaque driver configuration by default.
 - Offering names and resolved DeviceClass names are deterministic across reconciliation and restart.
 - Namespace ownership and RBAC are explicit; `visibility` alone is never treated as authorization.
@@ -245,3 +268,7 @@ This sequence keeps the existing `PartitionConfig` and webhook expansion path in
 - Whether offering references are namespace-scoped or cluster-scoped.
 - Whether an HTTP catalog belongs in this controller or in a separate service.
 - Whether recommendation logic is part of the catalog or a separate workload-intelligence component.
+- Whether annotation-based resolution is needed at all once aggregate class names are stable.
+- How offerings are renamed or versioned without breaking existing claims.
+- Whether to mutate templates at admission or teach the Pod and VMI handlers the resolver.
+- Whether `firstAvailable` subrequests are supported.
