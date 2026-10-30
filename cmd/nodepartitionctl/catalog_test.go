@@ -93,6 +93,8 @@ func TestBuildEntries_KindsAndVariants(t *testing.T) {
 		case "plain":
 			assert.Equal(t, 1, e.Count, "missing count label means one instance")
 			assert.Empty(t, e.Variants)
+		case "gpu-full":
+			assert.Equal(t, "node", e.Alignment)
 		}
 	}
 }
@@ -180,12 +182,16 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 	assert.Contains(t, table.String(), "Requested class:")
 	assert.Contains(t, table.String(), "Source driver:")
 	assert.Contains(t, table.String(), "dra.nvme")
-	assert.Contains(t, table.String(), "Offering mode:")
-	assert.Contains(t, table.String(), "Topology alignment:")
+	assert.Contains(t, table.String(), "Mode:")
+	assert.Contains(t, table.String(), "Topology level:")
+	assert.Contains(t, table.String(), "Placement:")
 	assert.Contains(t, table.String(), "Capacity request:")
 	assert.Contains(t, table.String(), "VM passthrough:")
 	assert.Contains(t, table.String(), "GPU partition profile:")
 	assert.Contains(t, table.String(), "numaNode")
+	assert.Contains(t, table.String(), "scheduler-selected")
+	assert.NotContains(t, table.String(), "Offering mode:")
+	assert.NotContains(t, table.String(), "Topology alignment:")
 	assert.NotContains(t, table.String(), "secret")
 
 	var encoded bytes.Buffer
@@ -199,6 +205,83 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 	assert.Equal(t, "dra.nvme", contract.Requests[0].DeviceClass)
 	assert.Equal(t, "required", contract.Alignments[0].Enforcement)
 	assert.NotContains(t, encoded.String(), "secret")
+}
+
+func TestRunExplainFixedNumaReportsTopologyLevelAndPlacement(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("numa", map[string]string{
+		controller.LabelManaged:       "true",
+		controller.LabelPartitionType: "numa",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [
+    {"deviceClass":"dra.cpu","sourceDriver":"dra.cpu","count":1,"capacity":{"cpu":"384"}},
+    {"deviceClass":"dra.memory","sourceDriver":"dra.memory","count":1,"capacity":{"size":"527316020Ki"}}
+  ],
+  "alignments": [{"attribute":"resource.kubernetes.io/numaNode","requests":["dra.cpu","dra.memory"],"enforcement":"required"}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var table bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &table, "numa", "table"))
+	assert.Contains(t, table.String(), "Topology level:  numaNode")
+	assert.Contains(t, table.String(), "Placement:       scheduler-selected")
+	assert.Contains(t, table.String(), "resource.kubernetes.io/numaNode")
+	assert.NotContains(t, table.String(), "Topology level:  none")
+
+	var encoded bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &encoded, "numa", "json"))
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &got))
+	assert.Equal(t, "numaNode", got["alignment"])
+	assert.Equal(t, "scheduler-selected", got["placement"])
+}
+
+func TestRunExplainFixedNumaVariantReportsConcretePlacement(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("numa-numa0", map[string]string{
+		controller.LabelManaged:                    "true",
+		controller.LabelPartitionType:              "numa",
+		controller.CoordinatorDriverName + "/numa": "numa0",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [{"deviceClass":"dra.cpu","sourceDriver":"dra.cpu","count":1}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var table bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &table, "numa-numa0", "table"))
+	assert.Contains(t, table.String(), "Topology level:  numaNode")
+	assert.Contains(t, table.String(), "Placement:       numa0")
+}
+
+func TestRunExplainFixedPCIeRootReportsPCIePlacement(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	dc := class("pcieroot-numa0-pci0000-c4", map[string]string{
+		controller.LabelManaged:                        "true",
+		controller.LabelPartitionType:                  "pcieroot",
+		controller.CoordinatorDriverName + "/numa":     "numa0-pci0000-c4",
+		controller.CoordinatorDriverName + "/pcieRoot": "pci0000-c4",
+	}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{
+  "kind": "PartitionConfig",
+  "mode": "container",
+  "subResources": [{"deviceClass":"gpu.nvidia.com","sourceDriver":"gpu.nvidia.com","count":1}]
+}`)}
+	_, err := client.ResourceV1().DeviceClasses().Create(context.Background(), &dc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var table bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &table, "pcieroot-numa0-pci0000-c4", "table"))
+	assert.Contains(t, table.String(), "Topology level:  pcieRoot")
+	assert.Contains(t, table.String(), "Placement:       pci0000-c4")
+	assert.NotContains(t, table.String(), "Placement:       numa0-pci0000-c4")
 }
 
 func TestRunExplainAcceptsTopologyVariant(t *testing.T) {

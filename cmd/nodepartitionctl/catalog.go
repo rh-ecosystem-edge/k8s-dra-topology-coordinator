@@ -99,7 +99,7 @@ func newEntry(dc resourcev1.DeviceClass, kind string) Entry {
 		Categories:    splitList(dc.Annotations[controller.AnnotationCategories]),
 		WorkloadTypes: splitList(dc.Annotations[controller.AnnotationWorkloadTypes]),
 		Mode:          dc.Labels[controller.LabelMode],
-		Alignment:     dc.Labels[controller.LabelAlignment],
+		Alignment:     topologyLevel(dc),
 		Count:         count,
 	}
 }

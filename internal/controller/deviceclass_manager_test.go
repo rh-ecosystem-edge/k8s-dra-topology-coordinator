@@ -256,6 +256,9 @@ func TestDeviceClassManager_SyncDeviceClasses_PCIePartitionsAreNotRails(t *testi
 	}}
 
 	require.NoError(t, manager.SyncDeviceClasses(context.Background(), results))
+	specific, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-example-com-pcieroot-numa0-pci0000-00-loose", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "pci0000-00", specific.Labels[LabelPCIeRoot])
 	classes, err := client.ResourceV1().DeviceClasses().List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
 	for _, dc := range classes.Items {
@@ -1703,6 +1706,7 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateOmitsRailIndex(t 
 	rail, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "gpu-nic-pair-rail0", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "0", rail.Labels[CoordinatorDriverName+"/railIndex"])
+	assert.Equal(t, "pci0000-00", rail.Labels[LabelPCIeRoot])
 }
 
 func TestDeviceClassManager_PublishDeviceClass_PreservesForeignMetadata(t *testing.T) {
