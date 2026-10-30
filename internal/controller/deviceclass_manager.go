@@ -37,6 +37,10 @@ const (
 	LabelAlignment     = CoordinatorDriverName + "/alignment"
 	LabelCount         = CoordinatorDriverName + "/count"
 	LabelAggregate     = CoordinatorDriverName + "/aggregate"
+	LabelNuma          = CoordinatorDriverName + "/numa"
+	LabelPCIeRoot      = CoordinatorDriverName + "/pcieRoot"
+	LabelRailIndex     = CoordinatorDriverName + "/railIndex"
+	LabelCoupling      = CoordinatorDriverName + "/coupling"
 	LabelOffering      = CoordinatorDriverName + "/offering"
 	LabelMode          = CoordinatorDriverName + "/mode"
 	LabelSource        = CoordinatorDriverName + "/source"
@@ -461,7 +465,7 @@ func (m *DeviceClassManager) SyncDeviceClasses(ctx context.Context, results []Pa
 	}
 	for _, dc := range classes.Items {
 		if dc.Labels[CoordinatorDriverName+"/partitionType"] == string(PartitionPCIeRoot) &&
-			dc.Labels[CoordinatorDriverName+"/railIndex"] != "" {
+			dc.Labels[LabelRailIndex] != "" {
 			return fmt.Errorf("legacy fixed-partition rail DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
 		}
 	}
@@ -782,8 +786,8 @@ func (m *DeviceClassManager) cleanupStaleDeviceClasses(ctx context.Context, acti
 		profile := dc.Labels[CoordinatorDriverName+"/profile"]
 		partType := dc.Labels[CoordinatorDriverName+"/partitionType"]
 		tierName := dc.Labels[CoordinatorDriverName+"/tierName"]
-		numa := dc.Labels[CoordinatorDriverName+"/numa"]
-		coupling := dc.Labels[CoordinatorDriverName+"/coupling"]
+		numa := dc.Labels[LabelNuma]
+		coupling := dc.Labels[LabelCoupling]
 
 		// Tier-named aggregates use profile-tierName as their key;
 		// regular partitions use profile-partitionType[-numa][-coupling].
@@ -844,10 +848,13 @@ func (m *DeviceClassManager) buildDeviceClassFromCache(profile string, partType 
 		CoordinatorDriverName + "/partitionType": string(partType),
 	}
 	if nameSuffix != "" {
-		labels[CoordinatorDriverName+"/numa"] = strings.TrimPrefix(nameSuffix, "-")
+		labels[LabelNuma] = strings.TrimPrefix(nameSuffix, "-")
+	}
+	if partType == PartitionPCIeRoot && len(representative.PCIeRoots) > 0 {
+		labels[LabelPCIeRoot] = sanitizeForName(representative.PCIeRoots[0])
 	}
 	if coupling != CouplingNone {
-		labels[CoordinatorDriverName+"/coupling"] = string(coupling)
+		labels[LabelCoupling] = string(coupling)
 	}
 	if count > 1 {
 		labels[CoordinatorDriverName+"/count"] = fmt.Sprintf("%d", count)
@@ -1335,7 +1342,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				continue
 			}
 			prefix := sanitizeForName(dc.Labels[CoordinatorDriverName+"/grouping"]) + "-rail"
-			if dc.Labels[CoordinatorDriverName+"/railIndex"] != "" && strings.HasPrefix(dc.Name, prefix) {
+			if dc.Labels[LabelRailIndex] != "" && strings.HasPrefix(dc.Name, prefix) {
 				return fmt.Errorf("legacy non-rail grouping DeviceClass %q requires migration; remove it before publishing topology-specific names", dc.Name)
 			}
 		}
@@ -1431,8 +1438,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		aggKey := truncateLabel(entry.representative.GroupingName) + "-" + sanitizeForName(entry.representative.Alignment)
 		dc := m.buildGroupingDeviceClass(aggKey, entry.representative, entry.config, entry.count)
 		dc.Name = sanitizeForName(entry.representative.GroupingName)
-		delete(dc.Labels, CoordinatorDriverName+"/numa")
-		delete(dc.Labels, CoordinatorDriverName+"/railIndex")
+		delete(dc.Labels, LabelNuma)
+		delete(dc.Labels, LabelPCIeRoot)
+		delete(dc.Labels, LabelRailIndex)
 		dc.Labels[LabelAggregate] = "true"
 		applyIntentMetadata(dc, entry.representative.Intent)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
@@ -1715,10 +1723,13 @@ func (m *DeviceClassManager) buildGroupingDeviceClass(
 		labels[LabelSource] = SourceConfigMap
 	}
 	if representative.Rail {
-		labels[CoordinatorDriverName+"/railIndex"] = fmt.Sprintf("%d", representative.InstanceIndex)
+		labels[LabelRailIndex] = fmt.Sprintf("%d", representative.InstanceIndex)
+	}
+	if representative.Alignment == "pcieRoot" && len(representative.PCIeRoots) > 0 {
+		labels[LabelPCIeRoot] = sanitizeForName(representative.PCIeRoots[0])
 	}
 	if len(representative.NUMANodes) > 0 {
-		labels[CoordinatorDriverName+"/numa"] = numaKey(representative.NUMANodes)
+		labels[LabelNuma] = numaKey(representative.NUMANodes)
 	}
 	if count > 1 {
 		labels[CoordinatorDriverName+"/count"] = fmt.Sprintf("%d", count)

@@ -23,6 +23,7 @@ type Contract struct {
 	Kind       string              `json:"kind"`
 	Mode       string              `json:"mode,omitempty"`
 	Alignment  string              `json:"alignment,omitempty"`
+	Placement  string              `json:"placement,omitempty"`
 	Requests   []ContractRequest   `json:"requests"`
 	Alignments []ContractAlignment `json:"alignments,omitempty"`
 }
@@ -113,10 +114,47 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 		Name:       dc.Name,
 		Kind:       kind,
 		Mode:       mode,
-		Alignment:  dc.Labels[controller.LabelAlignment],
+		Alignment:  topologyLevel(dc),
+		Placement:  placement(dc),
 		Requests:   requests,
 		Alignments: alignments,
 	}, nil
+}
+
+// topologyLevel returns the topology dimension represented by the class.
+// Grouping classes publish their configured alignment directly. Fixed
+// partition classes publish partitionType instead, so derive the equivalent
+// topology level for the user-facing contract.
+func topologyLevel(dc resourcev1.DeviceClass) string {
+	if alignment := dc.Labels[controller.LabelAlignment]; alignment != "" {
+		return alignment
+	}
+	switch dc.Labels[controller.LabelPartitionType] {
+	case string(controller.PartitionNUMA):
+		return "numaNode"
+	case string(controller.PartitionPCIeRoot):
+		return "pcieRoot"
+	case string(controller.PartitionFull):
+		return "node"
+	default:
+		return ""
+	}
+}
+
+// placement describes whether the class selects a concrete topology value or
+// leaves placement to the scheduler. Fixed and grouping aggregates omit the
+// concrete NUMA/rail labels and therefore report scheduler-selected.
+func placement(dc resourcev1.DeviceClass) string {
+	if value := dc.Labels[controller.LabelPCIeRoot]; value != "" {
+		return value
+	}
+	if value := dc.Labels[controller.LabelNuma]; value != "" {
+		return value
+	}
+	if value := dc.Labels[controller.LabelRailIndex]; value != "" {
+		return "rail" + value
+	}
+	return "scheduler-selected"
 }
 
 func partitionConfig(dc resourcev1.DeviceClass) (controller.PartitionConfig, error) {
@@ -158,8 +196,9 @@ func writeContractTable(w io.Writer, contract Contract) error {
 	for _, row := range [][]string{
 		{"Name:", contract.Name},
 		{"Kind:", contract.Kind},
-		{"Offering mode:", dash(contract.Mode)},
-		{"Topology alignment:", emptyValue(contract.Alignment)},
+		{"Mode:", dash(contract.Mode)},
+		{"Topology level:", emptyValue(contract.Alignment)},
+		{"Placement:", emptyValue(contract.Placement)},
 	} {
 		if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
 			return err
