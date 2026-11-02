@@ -428,7 +428,7 @@ The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless i
 Tagged releases also publish `nodepartitionctl` archives for Linux `amd64` and `arm64` on the GitHub Release page. Download the archive for your host, verify it with `checksums.txt`, and place the extracted binary on your `PATH`:
 
 ```sh
-VERSION=0.1.0
+VERSION=0.2.0
 ARCH=amd64 # use arm64 on aarch64 hosts
 curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
 curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/checksums.txt"

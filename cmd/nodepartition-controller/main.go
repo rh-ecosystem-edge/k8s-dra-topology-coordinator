@@ -124,7 +124,7 @@ func runController(cmd *cobra.Command, _ []string) error {
 
 	// Start health checker regardless of leader status
 	const healthCheckPort = 8081
-	healthChecker := health.NewChecker(healthCheckPort, "1.0.0")
+	healthChecker := health.NewChecker(healthCheckPort, "0.2.0")
 	healthChecker.AddCheck("basic", health.BasicHealthCheck())
 	if enableMetrics {
 		healthChecker.Handle("/metrics", metrics.Handler())
