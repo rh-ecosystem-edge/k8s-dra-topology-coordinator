@@ -1,0 +1,13 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: demo-mi300x-rdma-rail
+  namespace: default
+spec:
+  spec:
+    devices:
+      requests:
+      - name: rail
+        exactly:
+          deviceClassName: mi300x-rdma-rail
+          count: 1

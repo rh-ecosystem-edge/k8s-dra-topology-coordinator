@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mi300x-inference-numa
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  alignment: numaNode
+  categories: ai,inference,latency
+  description: One AMD MI300X with 4 CPUs and 4 GiB of memory aligned to the same NUMA node.
+  devices: |
+    - class: gpu.amd.com
+      count: 1
+    - class: dra.cpu
+      count: 1
+      capacity:
+        dra.cpu/cpu: "4"
+    - class: dra.memory
+      count: 1
+      capacity:
+        size: 4Gi
+  displayName: MI300X NUMA-local inference
+  intentLevel: workload
+  name: mi300x-inference-numa
+  offering: "true"
+  visibility: public
+  workloadTypes: inference,serving,rag
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mi300x-numa-bundle
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  alignment: numaNode
+  categories: ai,inference,training
+  description: Four AMD MI300X GPUs constrained to one NUMA node for tensor-parallel workloads.
+  devices: |
+    - class: gpu.amd.com
+      count: 4
+  displayName: MI300X four-GPU NUMA bundle
+  intentLevel: workload
+  name: mi300x-numa-bundle
+  offering: "true"
+  visibility: public
+  workloadTypes: tensor-parallel,distributed-inference,training
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mi300x-rdma-rail
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  mode: passthrough
+  alignment: pcieRoot
+  categories: ai,networking,rdma
+  description: One AMD MI300X VFIO VF and one Mellanox SR-IOV VF on the same PCIe root.
+  devices: |
+    - class: gpu.amd.com
+      requestClass: gpu.amd.com
+      selectors:
+        - 'device.attributes["gpu.amd.com"].type == "vfio"'
+        - 'device.attributes["gpu.amd.com"].isVF == true'
+      count: 1
+      passthrough: true
+    - class: sriovnetwork.k8snetworkplumbingwg.io
+      requestClass: sriovnetwork.k8snetworkplumbingwg.io
+      count: 1
+      passthrough: true
+      opaque:
+        driver: sriovnetwork.k8snetworkplumbingwg.io
+        parameters:
+          apiVersion: sriovnetwork.k8snetworkplumbingwg.io/v1alpha1
+          kind: VfConfig
+          driver: vfio-pci
+  displayName: MI300X RDMA rail
+  intentLevel: capability
+  name: mi300x-rdma-rail
+  offering: "true"
+  rail: "true"
+  visibility: public
+  workloadTypes: distributed-inference,distributed-training

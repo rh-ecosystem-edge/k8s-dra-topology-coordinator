@@ -1,0 +1,24 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
+metadata:
+  name: demo-mi300x-rdma-rail
+  namespace: default
+spec:
+  resourceClaims:
+  - name: rail
+    resourceClaimTemplateName: demo-mi300x-rdma-rail
+  domain:
+    cpu:
+      model: host-passthrough
+    resources:
+      requests:
+        memory: 1Gi
+    devices:
+      disks:
+      - name: containerdisk
+        disk:
+          bus: virtio
+  volumes:
+  - name: containerdisk
+    containerDisk:
+      image: quay.io/kubevirt/cirros-container-disk-demo:latest

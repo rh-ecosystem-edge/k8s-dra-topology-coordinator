@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mi300x-inference-numa
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  alignment: numaNode
+  categories: ai,inference,latency
+  description: One AMD MI300X with 4 CPUs and 4 GiB of memory aligned to the same NUMA node.
+  devices: |
+    - class: gpu.amd.com
+      count: 1
+    - class: dra.cpu
+      count: 1
+      capacity:
+        dra.cpu/cpu: "4"
+    - class: dra.memory
+      count: 1
+      capacity:
+        size: 4Gi
+  displayName: MI300X NUMA-local inference
+  intentLevel: workload
+  name: mi300x-inference-numa
+  offering: "true"
+  visibility: public
+  workloadTypes: inference,serving,rag

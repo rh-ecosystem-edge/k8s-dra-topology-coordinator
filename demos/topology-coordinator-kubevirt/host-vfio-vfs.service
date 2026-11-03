@@ -1,0 +1,15 @@
+[Unit]
+Description=Bind AMD GIM SR-IOV VFs to vfio-pci
+Requires=systemd-modules-load.service
+After=systemd-modules-load.service
+Before=kubelet.service
+ConditionPathExists=/sys/bus/pci/drivers/gim
+ConditionPathExists=/sys/bus/pci/drivers/vfio-pci
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/amd-gim-vfio-vfs
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
