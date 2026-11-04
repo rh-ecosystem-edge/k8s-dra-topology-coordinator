@@ -54,6 +54,7 @@ Useful variables:
 | `E2E_REQUIRE_CPU` | `false` | Require `dra.cpu` slices for cross-driver checks |
 | `E2E_REQUIRE_KUBEVIRT` | `false` | Require KubeVirt for the optional VMI profile |
 | `E2E_CHART_PATH` | repository chart | Chart path used by Helm |
+| `E2E_TIMEOUT` | `5m` | Go duration for per-step waits; must be positive |
 
 The tagged package can be compiled without a cluster:
 

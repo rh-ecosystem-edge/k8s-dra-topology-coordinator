@@ -5,7 +5,7 @@
 explicit rails, container/passthrough modes, versioned `PartitionConfig`,
 custom driver identity, HA admission consistency, and the coordinator harness
 bridge. The historical snapshots below describe the state at PR2 design time;
-use [`README.md`](../../README.md), [`test/e2e/README.md`](../../test/e2e/README.md),
+use [`README.md`](../../README.md), [`docs/configuration.md`](../configuration.md), [`test/e2e/README.md`](../../test/e2e/README.md),
 and [`docs/harness-test-plan.md`](../harness-test-plan.md) for current behavior.
 **Handoff target:** codex
 **Repo:** `rh-ecosystem-edge/k8s-dra-topology-coordinator` (Go, Kubernetes DRA)

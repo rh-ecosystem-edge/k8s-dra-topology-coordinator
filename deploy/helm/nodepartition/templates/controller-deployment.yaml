@@ -56,6 +56,7 @@ spec:
             - --leader-election-namespace={{ .Values.controller.leaderElection.namespace }}
             - --leader-election-id={{ .Values.controller.leaderElection.id }}
             - --webhook-port={{ .Values.controller.webhook.port }}
+            - --health-port={{ .Values.controller.healthPort }}
             - --tls-cert=/etc/webhook/tls/tls.crt
             - --tls-key=/etc/webhook/tls/tls.key
             {{- if not .Values.controller.metrics.enabled }}

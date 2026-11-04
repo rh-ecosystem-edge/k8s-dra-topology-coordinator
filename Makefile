@@ -3,6 +3,8 @@
 .PHONY: build test test-coverage lint setup-envtest e2e clean deps fmt vet dev
 
 # Build variables
+VERSION ?= $(or $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//'),dev)
+LDFLAGS=-s -w -extldflags=-static -X main.version=$(VERSION)
 BINARY_DIR=bin
 BINARY=$(BINARY_DIR)/nodepartition-controller
 
@@ -12,7 +14,7 @@ GOARCH=$(shell go env GOARCH)
 
 # Build the controller
 build: $(BINARY_DIR)
-	CGO_ENABLED=0 $(GO) build -ldflags="-s -w -extldflags=-static" -trimpath -o $(BINARY) ./cmd/nodepartition-controller
+	CGO_ENABLED=0 $(GO) build -ldflags="$(LDFLAGS)" -trimpath -o $(BINARY) ./cmd/nodepartition-controller
 	CGO_ENABLED=0 $(GO) build -ldflags="-s -w -extldflags=-static" -trimpath -o $(BINARY_DIR)/nodepartitionctl ./cmd/nodepartitionctl
 
 # Create binary directory

@@ -1,7 +1,7 @@
 # Harness bridge
 
 `run-coordinator-e2e.sh` is a coordinator-side verification command for
-[`k8s-dra-harness`](../../../../k8s-dra-harness). The harness owns the DRA
+[`k8s-dra-harness`](https://github.com/johnahull/k8s-dra-harness). The harness owns the DRA
 driver and workload namespace; this script owns a unique coordinator release,
 the evidence directory, and any fixture manifests passed on the command line.
 

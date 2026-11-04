@@ -21,6 +21,8 @@ controller:
     annotations: {}
     name: ""
   shutdownTimeout: "30s"
+  # Port for health and metrics; passed to the controller as --health-port and
+  # used for the containerPort and NetworkPolicy.
   healthPort: 8081
   # Namespace whose topology-rule and device-grouping ConfigMaps the controller
   # trusts. Defaults to the release namespace.
@@ -33,7 +35,7 @@ controller:
     namespace: "kube-system"
     id: "nodepartition-controller"
   metrics:
-    # Serve /metrics on the health port (8081), unauthenticated over plain HTTP.
+    # Serve /metrics on the health port (controller.healthPort), unauthenticated over plain HTTP.
     enabled: true
   webhook:
     port: 9443

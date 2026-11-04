@@ -1,6 +1,6 @@
 # Intent Request and Offering Catalog Options
 
-**Status:** Design options
+**Status:** Option A implemented in v0.2.0 (explicit `offering` label, aggregate marker, duplicate-name failure, and `nodepartitionctl offerings list|get|explain`). Options B and C remain open design options.
 
 **Scope:** First-class workload intent requests and discoverable hardware offerings.
 
@@ -38,7 +38,7 @@ The coordinator guarantees that an offering name identifies the aggregate class,
 Required work:
 
 - document aggregate DeviceClass names as the stable request target;
-- add an explicit `nodepartition.dra.k8s.io/offering=true` label to distinguish curated offerings from other grouping classes, auto-detected groupings, and fixed partition classes. Today `IsOffering()` (`internal/controller/grouping.go`) infers offering status from any metadata field, and `applyIntentMetadata` writes only the `intent-level` and `visibility` labels. The new label must come from explicit configuration, not be re-derived from `IsOffering()`;
+- add an explicit `nodepartition.dra.k8s.io/offering=true` label to distinguish curated offerings from other grouping classes, auto-detected groupings, and fixed partition classes. `IsOffering()` (`internal/controller/grouping.go`) still means "has any intent metadata". The `offering` label is written by `applyIntentMetadata` only from the explicit `offering: "true"` ConfigMap key, never re-derived from `IsOffering()`;
 - add an explicit aggregate marker label. Aggregate classes are currently identified only by the absence of the `numa` and `railIndex` labels, which a resolver should not rely on;
 - keep the existing webhook unchanged; and
 - provide a CLI/catalog command that resolves metadata to the DeviceClass name.

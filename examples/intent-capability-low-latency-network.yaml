@@ -1,3 +1,4 @@
+# Apply in the coordinator config namespace: kubectl -n <config-namespace> apply -f intent-capability-low-latency-network.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
