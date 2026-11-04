@@ -39,6 +39,9 @@ const (
 	retryPeriod               = 2 * time.Second
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 var (
 	kubecfg                 string
 	driverName              string
@@ -48,6 +51,7 @@ var (
 	configNamespace         string
 	leaderElectionID        string
 	webhookPort             int
+	healthPort              int
 	tlsCertFile             string
 	tlsKeyFile              string
 	enableMetrics           bool
@@ -89,6 +93,8 @@ func init() {
 		"Leader election lease name")
 	rootCmd.Flags().IntVar(&webhookPort, "webhook-port", 9443,
 		"Port for the mutating webhook HTTPS server")
+	rootCmd.Flags().IntVar(&healthPort, "health-port", 8081,
+		"Port for the health and metrics HTTP server")
 	rootCmd.Flags().StringVar(&tlsCertFile, "tls-cert", "/etc/webhook/tls/tls.crt",
 		"Path to TLS certificate for webhook server")
 	rootCmd.Flags().StringVar(&tlsKeyFile, "tls-key", "/etc/webhook/tls/tls.key",
@@ -122,9 +128,12 @@ func runController(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid --partition-mode %q: must be auto, partitions, or groupings", partitionMode)
 	}
 
+	if healthPort < 1 || healthPort > 65535 || healthPort == webhookPort {
+		return fmt.Errorf("invalid --health-port %d: must be 1-65535 and differ from --webhook-port %d", healthPort, webhookPort)
+	}
+
 	// Start health checker regardless of leader status
-	const healthCheckPort = 8081
-	healthChecker := health.NewChecker(healthCheckPort, "0.2.0")
+	healthChecker := health.NewChecker(healthPort, version)
 	healthChecker.AddCheck("basic", health.BasicHealthCheck())
 	if enableMetrics {
 		healthChecker.Handle("/metrics", metrics.Handler())
@@ -133,7 +142,7 @@ func runController(cmd *cobra.Command, _ []string) error {
 	if err := healthChecker.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start health checker: %v", err)
 	}
-	klog.Infof("Health check server started on port %d", healthCheckPort)
+	klog.Infof("Health check server started on port %d", healthPort)
 
 	ctrl := controller.NewController(clientset, driverName, controller.PartitionMode(partitionMode))
 	ctrl.SetConfigNamespace(configNamespace)

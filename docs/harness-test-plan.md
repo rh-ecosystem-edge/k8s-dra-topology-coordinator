@@ -8,7 +8,7 @@ hardware and KubeVirt lanes remain environment-dependent.
 ## 1. Goal
 
 Validate the topology coordinator end to end with
-[`k8s-dra-harness`](../../../devel/k8s-dra-harness) as the driver and workload
+[`k8s-dra-harness`](https://github.com/johnahull/k8s-dra-harness) as the driver and workload
 environment. The plan covers the coordinator's catalog, grouping, admission,
 allocation, webhook high availability, configuration reload, and optional
 KubeVirt behavior.

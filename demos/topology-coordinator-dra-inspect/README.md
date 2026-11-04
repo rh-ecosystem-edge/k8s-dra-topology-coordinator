@@ -28,7 +28,7 @@ vhs demo.tape
 
 The recording expects:
 
-- Kubernetes access to the live cluster at `10.6.62.52`
+- Kubernetes access to the live cluster (set `KUBECONFIG` to its kubeconfig)
 - `dra-inspect` and `nodepartitionctl` on `PATH`
 - the topology coordinator and capacity-backed `mi300x-inference-numa` offering already deployed
 - the AMD GPU, CPU, memory, and network DRA drivers already running

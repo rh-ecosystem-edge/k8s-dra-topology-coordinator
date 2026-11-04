@@ -58,7 +58,7 @@ PCI host device.
 
 ## Rehearsal
 
-Run this manually on `jhull@10.6.62.52` before generating media:
+Run this manually on the cluster host before generating media:
 
 ```bash
 export PATH=$HOME/.local/bin:$PATH
