@@ -207,6 +207,39 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 	assert.NotContains(t, encoded.String(), "secret")
 }
 
+func TestBuildContractReportsMIGProfileWithoutSelectors(t *testing.T) {
+	raw, err := json.Marshal(controller.PartitionConfig{
+		Kind: "PartitionConfig",
+		Mode: controller.OfferingModeContainer,
+		SubResources: []controller.SubResourceConfig{{
+			DeviceClass:  "mig.nvidia.com",
+			SourceDriver: "gpu.nvidia.com",
+			Count:        1,
+			Selectors:    []string{`device.attributes["gpu.nvidia.com"].profile == "1g.10gb"`},
+		}},
+	})
+	require.NoError(t, err)
+	dc := class("nvidia-mig-1g-10gb", map[string]string{
+		controller.LabelManaged:   "true",
+		controller.LabelGrouping:  "nvidia-mig-1g-10gb",
+		controller.LabelAggregate: "true",
+	}, nil)
+	dc.Spec.Config[0].Opaque = &resourcev1.OpaqueDeviceConfiguration{
+		Driver:     controller.CoordinatorDriverName,
+		Parameters: runtime.RawExtension{Raw: raw},
+	}
+
+	contract, err := buildContract(dc)
+	require.NoError(t, err)
+	require.Len(t, contract.Requests, 1)
+	assert.Equal(t, "1g.10gb", contract.Requests[0].Profile)
+	assert.NotContains(t, contract.Requests[0].Profile, "device.attributes")
+
+	var table bytes.Buffer
+	require.NoError(t, writeContractTable(&table, contract))
+	assert.Contains(t, table.String(), "GPU partition profile:  1g.10gb")
+}
+
 func TestRunExplainFixedNumaReportsTopologyLevelAndPlacement(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	dc := class("numa", map[string]string{

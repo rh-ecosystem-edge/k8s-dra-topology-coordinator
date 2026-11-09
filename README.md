@@ -240,6 +240,51 @@ source ~/.bashrc
 `offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, mode, topology level, placement, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. For grouping classes, the topology level comes from the configured `alignment`; for fixed partition classes it is derived from `partitionType` (`numa` → `numaNode`, `pcieroot` → `pcieRoot`, and `full` → `node`). Aggregate classes report `scheduler-selected` placement, while topology-specific variants report their concrete NUMA, PCIe-root, or rail label. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract; JSON field names remain stable (`mode`, `alignment`, and `partitionMode`), with `placement` identifying the selected or scheduler-chosen topology value.
 
 
+### Co-allocatable slices (NVIDIA dynamic MIG)
+
+Drivers that advertise partitions of one device as separate devices sharing a counter set (KEP-4815) fall into two cases. Mutually exclusive modes, such as AMD partition modes behind a single mutex counter, count as one device per GPU. Co-allocatable slices, such as MIG slices with disjoint memory-slice counters, can be allocated together. The coordinator packs slices against the counter capacity of their GPU and offers them to groupings as a separate class.
+
+Mark slices with a conditional `deviceClass` rule, and add an info rule for the profile attribute:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mig-slice-class
+  labels:
+    nodepartition.dra.k8s.io/topology-rule: "true"
+data:
+  attribute: gpu.nvidia.com/type
+  type: string
+  driver: gpu.nvidia.com
+  deviceClass: mig.nvidia.com
+  whenValue: mig
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mig-profile
+  labels:
+    nodepartition.dra.k8s.io/topology-rule: "true"
+data:
+  attribute: gpu.nvidia.com/profile
+  type: string
+  driver: gpu.nvidia.com
+```
+
+A grouping can then request slices by profile:
+
+```yaml
+devices: |
+  - class: mig.nvidia.com
+    profile: 1g.5gb
+    count: 2
+  - class: rdma.example.com
+    count: 1
+```
+
+The advertised instance counts are upper bounds. A GPU can be offered as slices in one grouping and as a full GPU in another; the scheduler's counters decide what is actually allocatable. A grouping instance uses each GPU either as a full device or as slices, never both, and a class can appear with only one `profile` per grouping. Fixed partitions (`pcieroot`, `numa`, `full`) still count whole GPUs.
+
 ## Driver requirements
 
 The coordinator can work with any DRA driver that publishes usable topology information in `ResourceSlice` objects. For topology-aware partitions, configure rules for the driver-specific NUMA, PCIe-root, socket, or other attributes that the cluster exposes.

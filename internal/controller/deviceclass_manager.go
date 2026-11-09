@@ -989,7 +989,7 @@ func (m *DeviceClassManager) buildPartitionConfig(_ PartitionType, representativ
 		if len(representative.Devices) > 0 {
 			driversWithScalarAttribute := make(map[string]bool)
 			for _, dev := range representative.Devices {
-				if deviceHasScalarAttribute(dev, rule.Attribute) {
+				if deviceHasScalarAttribute(dev, qualifiedAttribute(baseDriverName(dev.DriverName), rule.Attribute)) {
 					driversWithScalarAttribute[baseDriverName(dev.DriverName)] = true
 				}
 			}
@@ -1378,6 +1378,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		alignment        string
 		mode             OfferingMode
 		requests         map[string]RequestContract
+		deviceProfiles   map[string]string
 		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		autoDetected     bool           // identical across instances, like intent
@@ -1395,6 +1396,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				alignment:        entry.representative.Alignment,
 				mode:             entry.representative.Mode,
 				requests:         entry.representative.Requests,
+				deviceProfiles:   entry.representative.DeviceProfiles,
 				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				autoDetected:     entry.representative.AutoDetected,
@@ -1421,6 +1423,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			Alignment:      state.alignment,
 			Mode:           state.mode,
 			Requests:       state.requests,
+			DeviceProfiles: state.deviceProfiles,
 			Intent:         state.intent,
 			AutoDetected:   state.autoDetected,
 			DeviceCounts:   intersectedCounts,
@@ -1511,9 +1514,10 @@ func groupingRequestContractKey(inst GroupingInstance) string {
 		mode = OfferingModeContainer
 	}
 	contract := struct {
-		Mode     OfferingMode               `json:"mode,omitempty"`
-		Requests map[string]RequestContract `json:"requests,omitempty"`
-	}{Mode: mode, Requests: inst.Requests}
+		Mode           OfferingMode               `json:"mode,omitempty"`
+		Requests       map[string]RequestContract `json:"requests,omitempty"`
+		DeviceProfiles map[string]string          `json:"deviceProfiles,omitempty"`
+	}{Mode: mode, Requests: inst.Requests, DeviceProfiles: inst.DeviceProfiles}
 	data, _ := json.Marshal(contract)
 	return string(data)
 }
@@ -1604,6 +1608,11 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			sr.Capacity = cap
 		}
 
+		if profile, ok := inst.DeviceProfiles[driverClass]; ok {
+			sr.Selectors = append(sr.Selectors, fmt.Sprintf(`device.attributes[%q].profile == %q`,
+				m.driverForClass(driverClass), profile))
+		}
+
 		if includeNUMA && len(inst.NUMANodes) > 0 {
 			// The selector is evaluated on the devices requestClass allocates,
 			// so it must use that driver's attribute domain.
@@ -1639,7 +1648,16 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			continue
 		}
 		if rule.Driver != "" {
-			if _, ok := inst.DeviceCounts[m.rules.GetDeviceClassForDriver(rule.Driver)]; !ok {
+			// DeviceCounts is keyed by per-device class, so match the rule's
+			// driver against every class present, not just the driver default.
+			present := false
+			for class := range inst.DeviceCounts {
+				if baseDriverName(m.driverForClass(class)) == rule.Driver {
+					present = true
+					break
+				}
+			}
+			if !present {
 				continue
 			}
 		}
@@ -1648,7 +1666,7 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 		if len(inst.Devices) > 0 {
 			driversWithAttribute := make(map[string]bool)
 			for _, dev := range inst.Devices {
-				val := deviceAttributeValueString(dev, rule.Attribute)
+				val := deviceAttributeValueString(dev, qualifiedAttribute(baseDriverName(dev.DriverName), rule.Attribute))
 				if val != "" {
 					driversWithAttribute[baseDriverName(dev.DriverName)] = true
 				}

@@ -1,0 +1,200 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-slice-class
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/topology-rule: "true"
+data:
+  attribute: gpu.nvidia.com/type
+  type: string
+  driver: gpu.nvidia.com
+  deviceClass: mig.nvidia.com
+  whenValue: mig
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-profile
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/topology-rule: "true"
+data:
+  attribute: gpu.nvidia.com/profile
+  type: string
+  driver: gpu.nvidia.com
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-1g-10gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-1g-10gb
+  displayName: NVIDIA MIG 1g.10gb
+  description: One dynamic 1g.10gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 1g.10gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-1g-10gb-me
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-1g-10gb-me
+  displayName: NVIDIA MIG 1g.10gb + media engines
+  description: One dynamic 1g.10gb MIG slice with media engines.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 1g.10gb+me
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-1g-20gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-1g-20gb
+  displayName: NVIDIA MIG 1g.20gb
+  description: One dynamic 1g.20gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 1g.20gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-2g-20gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-2g-20gb
+  displayName: NVIDIA MIG 2g.20gb
+  description: One dynamic 2g.20gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 2g.20gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-3g-40gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-3g-40gb
+  displayName: NVIDIA MIG 3g.40gb
+  description: One dynamic 3g.40gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 3g.40gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-4g-40gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-4g-40gb
+  displayName: NVIDIA MIG 4g.40gb
+  description: One dynamic 4g.40gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 4g.40gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-mig-7g-80gb
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-mig-7g-80gb
+  displayName: NVIDIA MIG 7g.80gb
+  description: One dynamic 7g.80gb MIG slice.
+  intentLevel: hardware-specific
+  categories: gpu,mig
+  workloadTypes: inference
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: mig.nvidia.com
+      profile: 7g.80gb
+      count: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-full-gpu
+  namespace: nodepartition
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: nvidia-full-gpu
+  displayName: NVIDIA full GPU
+  description: One whole NVIDIA GPU.
+  intentLevel: hardware-specific
+  categories: gpu,nvidia
+  workloadTypes: inference,training
+  visibility: public
+  offering: "true"
+  alignment: pcieRoot
+  devices: |
+    - class: gpu.nvidia.com
+      count: 1

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -234,4 +235,59 @@ func TestGroupOverlappingDevices_EmptyInput(t *testing.T) {
 	nonOverlapping, groups := GroupOverlappingDevices(nil)
 	assert.Empty(t, nonOverlapping)
 	assert.Empty(t, groups)
+}
+
+func TestPackDevices_AMDModeMutexPacksToOne(t *testing.T) {
+	packed := PackDevices(amdModeDevices(0, "spx", "dpx", "cpx"), nil)
+	assert.Len(t, packed, 1, "modes share one mutex counter of value 1")
+}
+
+func TestPackDevices_MIGSlicesPackDisjointly(t *testing.T) {
+	var slices []TopologyDevice
+	for _, d := range migGPU(0) {
+		if d.ExtendedAttributes[migDriver+"/type"].String() == "mig" {
+			slices = append(slices, d)
+		}
+	}
+	assert.Len(t, PackDevices(slices, migGPU(0)), 7)
+}
+
+func TestPackDevices_MixedProfilesRespectOverlap(t *testing.T) {
+	// 3g.20gb at memory slices 0-3 overlaps four 1g slices; the other four 1g fit beside it.
+	devices := []TopologyDevice{migDevice(0, "mig-3g-0", "mig", "3g.20gb", 0, 4)}
+	for i := 0; i < 7; i++ {
+		devices = append(devices, migDevice(0, fmt.Sprintf("mig-1g-%d", i), "mig", "1g.5gb", i, 1))
+	}
+	// Smallest-first packing takes all seven 1g slices and cannot also fit the 3g.
+	assert.Len(t, PackDevices(devices, append(devices, migGPU(0)[0])), 7)
+}
+
+func TestDynamicMIG_GPUStaysOneEffectiveDevice(t *testing.T) {
+	devices := append(migGPU(0), migGPU(1)...)
+
+	_, groups := GroupOverlappingDevices(devices)
+	require.Len(t, groups, 2, "one counter set per physical GPU")
+	assert.Equal(t, 2, EffectiveDeviceCount(devices)[migDriver], "tier math counts GPUs, not slices")
+}
+
+func TestDynamicMIG_RepresentativeIsFullGPU(t *testing.T) {
+	devices := migGPU(0)
+	// A full-size 7g slice consumes as much as the full GPU, so it must not win on list order.
+	full := migDevice(0, "gpu-0-mig-7g.40gb-0", "mig", "7g.40gb", 0, migSlices)
+	for _, order := range [][]TopologyDevice{append([]TopologyDevice{full}, devices...), append(devices, full)} {
+		assert.Equal(t, "gpu-0", selectRepresentative(order).DeviceName)
+	}
+}
+
+func TestDynamicMIG_AmpereMIGOnHasNoFullGPU(t *testing.T) {
+	// Documents a quirk: when the driver does not announce the full GPU, the
+	// representative is the largest slice.
+	var slices []TopologyDevice
+	for _, d := range migGPU(0) {
+		if d.DeviceName != "gpu-0" {
+			slices = append(slices, d)
+		}
+	}
+	slices = append(slices, migDevice(0, "gpu-0-mig-7g.40gb-0", "mig", "7g.40gb", 0, migSlices))
+	assert.Equal(t, "gpu-0-mig-7g.40gb-0", selectRepresentative(slices).DeviceName)
 }

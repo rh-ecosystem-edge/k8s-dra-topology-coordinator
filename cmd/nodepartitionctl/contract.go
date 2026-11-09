@@ -35,6 +35,7 @@ type ContractRequest struct {
 	Capacity      map[string]string `json:"capacity,omitempty"`
 	Passthrough   bool              `json:"passthrough,omitempty"`
 	PartitionMode string            `json:"partitionMode,omitempty"`
+	Profile       string            `json:"profile,omitempty"`
 }
 
 type ContractAlignment struct {
@@ -99,6 +100,7 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 			Capacity:      copyStringMap(sr.Capacity),
 			Passthrough:   sr.Passthrough,
 			PartitionMode: sr.PartitionMode,
+			Profile:       profileFromSelectors(sr.Selectors),
 		})
 	}
 	alignments := make([]ContractAlignment, 0, len(config.Alignments))
@@ -119,6 +121,24 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 		Requests:   requests,
 		Alignments: alignments,
 	}, nil
+}
+
+func profileFromSelectors(selectors []string) string {
+	const marker = "].profile == "
+	for _, selector := range selectors {
+		if !strings.HasPrefix(selector, "device.attributes[") {
+			continue
+		}
+		_, value, ok := strings.Cut(selector, marker)
+		if !ok {
+			continue
+		}
+		profile, err := strconv.Unquote(strings.TrimSpace(value))
+		if err == nil {
+			return profile
+		}
+	}
+	return ""
 }
 
 // topologyLevel returns the topology dimension represented by the class.
@@ -219,7 +239,7 @@ func writeContractTable(w io.Writer, contract Contract) error {
 			{"    Count:", strconv.Itoa(request.Count)},
 			{"    Capacity request:", emptyValue(capacity)},
 			{"    VM passthrough:", passthrough},
-			{"    GPU partition profile:", emptyValue(request.PartitionMode)},
+			{"    GPU partition profile:", emptyValue(request.Profile)},
 		}
 		for _, row := range rows {
 			if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
