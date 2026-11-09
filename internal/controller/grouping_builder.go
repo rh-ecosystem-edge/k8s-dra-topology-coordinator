@@ -385,7 +385,7 @@ func (b *GroupingBuilder) findInstances(
 					if got == gd.Count {
 						break
 					}
-					dk := c.dev.DriverName + "/" + c.dev.DeviceName
+					dk := deviceKey(c.dev)
 					if taken[dk] || picked[dk] {
 						continue
 					}
@@ -430,6 +430,10 @@ func (b *GroupingBuilder) findInstances(
 	}
 
 	return instances
+}
+
+func deviceKey(d TopologyDevice) string {
+	return d.DriverName + "/" + d.PoolName + "/" + d.DeviceName
 }
 
 func poolKey(gd GroupingDevice) string { return gd.Class + "|" + gd.Profile }
@@ -552,7 +556,7 @@ func (b *GroupingBuilder) collectUsedDevices(instances []GroupingInstance) map[s
 	used := make(map[string]bool)
 	for _, inst := range instances {
 		for _, d := range inst.Devices {
-			key := d.DriverName + "/" + d.DeviceName
+			key := deviceKey(d)
 			used[key] = true
 		}
 	}
@@ -566,7 +570,7 @@ func (b *GroupingBuilder) filterOutDevices(
 ) []TopologyDevice {
 	var remaining []TopologyDevice
 	for _, d := range devices {
-		key := d.DriverName + "/" + d.DeviceName
+		key := deviceKey(d)
 		if !used[key] {
 			remaining = append(remaining, d)
 		}

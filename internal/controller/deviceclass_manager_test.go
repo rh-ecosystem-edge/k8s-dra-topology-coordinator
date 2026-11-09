@@ -1568,6 +1568,56 @@ func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateIsDeterministic(t
 	assert.Equal(t, "pcieRoot", dc.Labels[CoordinatorDriverName+"/alignment"])
 }
 
+func TestDeviceClassManager_SyncGroupingDeviceClasses_AggregateRetainsMIGProfile(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	rules := migRules(t)
+	instances := buildMIGGroupingWith(t, rules, 1, "1g.5gb")
+	require.NotEmpty(t, instances)
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, rules)
+	require.NoError(t, manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
+		NodeName:  "node-1",
+		Instances: instances,
+	}}))
+
+	dc, err := client.ResourceV1().DeviceClasses().Get(context.Background(), "mig-nic", metav1.GetOptions{})
+	require.NoError(t, err)
+	var config PartitionConfig
+	require.NoError(t, json.Unmarshal(dc.Spec.Config[0].Opaque.Parameters.Raw, &config))
+
+	for _, sr := range config.SubResources {
+		if sr.DeviceClass == "mig.nvidia.com" {
+			assert.Contains(t, sr.Selectors, `device.attributes["gpu.nvidia.com"].profile == "1g.5gb"`)
+			return
+		}
+	}
+	t.Fatal("aggregate config is missing the MIG subresource")
+}
+
+func TestDeviceClassManager_RejectsConflictingMIGProfiles(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	base := GroupingInstance{
+		GroupingName:   "mig-offering",
+		Alignment:      "pcieRoot",
+		DeviceCounts:   map[string]int{"mig.nvidia.com": 1},
+		DeviceProfiles: map[string]string{"mig.nvidia.com": "1g.10gb"},
+		PCIeRoots:      []string{"pci0000:01"},
+	}
+	other := base
+	other.DeviceProfiles = map[string]string{"mig.nvidia.com": "2g.20gb"}
+	other.PCIeRoots = []string{"pci0000:02"}
+	other.InstanceIndex = 1
+
+	err := manager.SyncGroupingDeviceClasses(context.Background(), []GroupingResult{{
+		NodeName:  "node-1",
+		Instances: []GroupingInstance{base, other},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicting explicit request contract")
+	_, err = client.ResourceV1().DeviceClasses().Get(context.Background(), "mig-offering", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
 func TestDeviceClassManager_SyncGroupingDeviceClasses_IntentMetadataOnlyOnAggregate(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())

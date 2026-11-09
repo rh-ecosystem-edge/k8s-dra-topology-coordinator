@@ -252,7 +252,7 @@ func (s *TopologyRuleStore) GetDeviceClassForDevice(d TopologyDevice) string {
 	s.mu.RLock()
 	for _, rule := range s.rules {
 		if rule.Driver == driver && rule.DeviceClass != "" && rule.WhenValue != "" &&
-			deviceAttributeValueString(d, rule.Attribute) == rule.WhenValue {
+			deviceAttributeValueString(d, qualifiedAttribute(driver, rule.Attribute)) == rule.WhenValue {
 			s.mu.RUnlock()
 			return rule.DeviceClass
 		}
@@ -260,6 +260,14 @@ func (s *TopologyRuleStore) GetDeviceClassForDevice(d TopologyDevice) string {
 	s.mu.RUnlock()
 
 	return s.GetDeviceClassForDriver(driver)
+}
+
+// qualifiedAttribute places an unqualified DRA attribute in its driver's domain.
+func qualifiedAttribute(driver, attribute string) string {
+	if driver != "" && !strings.Contains(attribute, "/") {
+		return driver + "/" + attribute
+	}
+	return attribute
 }
 
 // BuildNUMACELSelector generates a CEL expression that pins devices from a

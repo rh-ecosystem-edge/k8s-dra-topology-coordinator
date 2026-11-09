@@ -179,6 +179,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 				RequestClass:  d.RequestClass,
 				RequestDriver: d.RequestDriver,
 				Count:         d.Count,
+				Profile:       d.Profile,
 				Passthrough:   d.Passthrough,
 				Selectors:     append([]string(nil), d.Selectors...),
 			}
@@ -337,16 +338,19 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		return g, fmt.Errorf("devices list cannot be empty")
 	}
 
-	seenClasses := make(map[string]struct{}, len(devices))
+	seenClasses := make(map[string]string, len(devices))
 	seenRequestClasses := make(map[string]struct{}, len(devices))
 	for i, d := range devices {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
 		}
-		if _, exists := seenClasses[d.Class]; exists {
+		if profile, exists := seenClasses[d.Class]; exists {
+			if profile != d.Profile {
+				return g, fmt.Errorf("device[%d] repeats class %q with a different profile; one profile per class is supported", i, d.Class)
+			}
 			return g, fmt.Errorf("device[%d] has duplicate class %q", i, d.Class)
 		}
-		seenClasses[d.Class] = struct{}{}
+		seenClasses[d.Class] = d.Profile
 		requestClass := d.RequestClass
 		if requestClass == "" {
 			requestClass = d.Class

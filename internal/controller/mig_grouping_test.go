@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -91,6 +92,38 @@ func TestGroupingBuilder_MIGSlicesWithNIC(t *testing.T) {
 		assert.Equal(t, 2, inst.DeviceCounts["mig.nvidia.com"])
 		assert.Equal(t, 1, inst.DeviceCounts["rdma.example.com"])
 		assert.Zero(t, inst.DeviceCounts[migDriver], "full GPU must not be picked for a slice entry")
+		assert.Equal(t, "1g.5gb", inst.DeviceProfiles["mig.nvidia.com"])
+	}
+}
+
+func TestGroupingBuilder_MIGSlicesFromDriverScopedResourceSliceAttributes(t *testing.T) {
+	model := NewTopologyModel()
+	var devices []resourcev1.Device
+	for _, d := range migGPU(0) {
+		attrs := map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+			"type":                                 {StringValue: strPtr(d.ExtendedAttributes[migDriver+"/type"].String())},
+			resourcev1.QualifiedName(AttrNUMANode): {IntValue: intPtr(0)},
+			resourcev1.QualifiedName(AttrPCIeRoot): {StringValue: strPtr("pci-0")},
+		}
+		if profile := deviceProfile(d); profile != "" {
+			attrs["profile"] = resourcev1.DeviceAttribute{StringValue: strPtr(profile)}
+		}
+		devices = append(devices, resourcev1.Device{
+			Name: d.DeviceName, Attributes: attrs, ConsumesCounters: d.ConsumesCounters,
+		})
+	}
+	model.UpdateFromResourceSlice(makeResourceSlice("mig-live", migDriver, "node-1", "node-1", devices))
+	rules := migRules(t)
+	model.SetRules(rules.GetRules())
+
+	results := NewGroupingBuilder(model, rules).BuildGroupings([]DeviceGrouping{{
+		Name: "mig-only", Alignment: "pcieRoot",
+		Devices: []GroupingDevice{{Class: "mig.nvidia.com", Profile: "1g.5gb", Count: 2}},
+	}})
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Instances, 3)
+	for _, inst := range results[0].Instances {
+		assert.Equal(t, 2, inst.DeviceCounts["mig.nvidia.com"])
 		assert.Equal(t, "1g.5gb", inst.DeviceProfiles["mig.nvidia.com"])
 	}
 }

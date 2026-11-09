@@ -503,6 +503,7 @@ func (m *TopologyModel) extractTopologyDevice(
 
 	for qn, attr := range attrs {
 		name := string(qn)
+		qualifiedName := qualifiedAttribute(driverName, name)
 
 		// Check standard attribute names first
 		switch name {
@@ -545,7 +546,7 @@ func (m *TopologyModel) extractTopologyDevice(
 
 		// Check topology rules for driver-specific attribute mappings
 		for _, rule := range m.rules {
-			if name != rule.Attribute || driverName != rule.Driver {
+			if qualifiedName != qualifiedAttribute(rule.Driver, rule.Attribute) || driverName != rule.Driver {
 				continue
 			}
 
@@ -566,7 +567,7 @@ func (m *TopologyModel) extractTopologyDevice(
 			}
 
 			// Also store as extended attribute for propagation to partition devices
-			td.ExtendedAttributes[name] = deviceAttributeFromDRA(attr)
+			td.ExtendedAttributes[qualifiedName] = deviceAttributeFromDRA(attr)
 		}
 	}
 

@@ -32,6 +32,18 @@ func validGroupingData(name string) map[string]string {
 	}
 }
 
+func TestGroupingStore_GetGroupingsPreservesProfile(t *testing.T) {
+	data := validGroupingData("mig-profile")
+	data["devices"] = "- class: mig.nvidia.com\n  profile: 1g.10gb\n  count: 2"
+	store := NewGroupingStore()
+	require.NoError(t, store.LoadFromConfigMap(makeGroupingConfigMap("mig-profile", data)))
+
+	groupings := store.GetGroupings()
+	require.Len(t, groupings, 1)
+	require.Len(t, groupings[0].Devices, 1)
+	assert.Equal(t, "1g.10gb", groupings[0].Devices[0].Profile)
+}
+
 func uniqueList(itemLength, count int) string {
 	values := make([]string, count)
 	for i := range values {
@@ -639,6 +651,31 @@ func TestGroupingBuilder_BasicPCIeRootAlignment(t *testing.T) {
 		assert.Equal(t, 1, inst.DeviceCounts["gpu.amd.com"])
 		assert.Equal(t, 1, inst.DeviceCounts["dpu.pensando.com"])
 	}
+}
+
+func TestGroupingBuilder_DeviceNamesAreScopedToPool(t *testing.T) {
+	first := makeTestDevice("gpu.example.com", "gpu-0", int64Ptr(0), stringPtr("pcie-0"))
+	first.PoolName = "pool-a"
+	second := makeTestDevice("gpu.example.com", "gpu-0", int64Ptr(0), stringPtr("pcie-0"))
+	second.PoolName = "pool-b"
+	model := NewTopologyModel()
+	model.mu.Lock()
+	model.nodes = map[string]*NodeTopology{"node-1": {
+		NodeName:        "node-1",
+		DevicesByDriver: map[string][]TopologyDevice{"gpu.example.com": {first, second}},
+	}}
+	model.mu.Unlock()
+
+	results := NewGroupingBuilder(model, NewTopologyRuleStore()).BuildGroupings([]DeviceGrouping{{
+		Name: "two-gpus", Alignment: "pcieRoot",
+		Devices: []GroupingDevice{{Class: "gpu.example.com", Count: 2}},
+	}})
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Instances, 1)
+	assert.ElementsMatch(t, []string{"pool-a", "pool-b"}, []string{
+		results[0].Instances[0].Devices[0].PoolName,
+		results[0].Instances[0].Devices[1].PoolName,
+	})
 }
 
 func TestGroupingBuilder_BuildGroupingsCarriesRequestContract(t *testing.T) {
