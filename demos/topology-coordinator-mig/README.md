@@ -50,13 +50,13 @@ vhs demos/topology-coordinator-mig/demo.tape
 The recording shows the MIG profile and NUMA placement contract, the minimal
 claim and Pod, the allocation, compact and full topology views, shared-counter
 accounting, and the topology check. The counter view includes the cluster's
-DCGM Exporter claim, which requests all GPUs with `adminAccess: true`. DRA
-admin-access claims are for monitoring or management and ignore ordinary
-resource allocations. Therefore, while the demo MIG claim is active,
-`dra-inspect`'s combined counter listing shows an apparent overcommit on GPU 0;
-that total alone does not indicate a scheduler capacity conflict. After cleanup,
-the exporter-only counter view is within capacity. The recording cleanup removes
-only `demo-nvidia-mig-numa-pod` and `demo-nvidia-mig-numa`.
+DCGM Exporter and DRA validator claims, which request GPUs with
+`adminAccess: true`. `dra-inspect` lists those claims separately without
+counting them against capacity. During the recording, GPU 0 counts the demo
+MIG slice's 9984Mi memory and 16 multiprocessors and reports within capacity.
+After cleanup, the remaining admin-access claims are shown as not counted. The
+recording cleanup removes only `demo-nvidia-mig-numa-pod` and
+`demo-nvidia-mig-numa`.
 
 ## Files
 
