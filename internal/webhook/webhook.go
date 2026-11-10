@@ -430,7 +430,11 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 	requestNameMap := make(map[string][]string)
 
 	for _, sr := range config.SubResources {
-		sanitized := sanitizeDeviceClassName(sr.DeviceClass)
+		identity := sr.DeviceClass
+		if sr.Name != "" {
+			identity = sr.Name
+		}
+		sanitized := sanitizeDeviceClassName(identity)
 		var requestNames []string
 
 		splits := int(splitCount(config.Mode, sr))
@@ -446,7 +450,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 			} else {
 				name = prefix + "-" + sanitized
 			}
-			requestNameMap[sr.DeviceClass] = append(requestNameMap[sr.DeviceClass], name)
+			requestNameMap[identity] = append(requestNameMap[identity], name)
 			requestNames = append(requestNames, name)
 
 			exact := &resourcev1.ExactDeviceRequest{
@@ -507,7 +511,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 		if driver == "" {
 			driver = sr.DeviceClass
 		}
-		driverCounts[driver] = sr.Count
+		driverCounts[driver] += sr.Count
 	}
 
 	// Build constraints from alignments.
@@ -565,7 +569,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 
 		attr := resourcev1.FullyQualifiedName(alignment.Attribute)
 
-		if maxSplit <= 1 {
+		if alignment.Scope == "group" || maxSplit <= 1 {
 			// No splits — single constraint covering all requests
 			var allRequests []string
 			for _, dr := range perDriver {
@@ -634,6 +638,12 @@ func validateExpandedRequestNames(requests []resourcev1.DeviceRequest) error {
 func alignedRequests(subRequests []resourcev1.DeviceRequest, config *controller.PartitionConfig) map[string][]string {
 	aligned := make(map[string][]string, len(config.Alignments))
 	for _, alignment := range config.Alignments {
+		if alignment.Scope == "group" {
+			for _, sub := range subRequests {
+				aligned[alignment.Attribute] = append(aligned[alignment.Attribute], sub.Name)
+			}
+			continue
+		}
 		for _, sub := range subRequests {
 			if sub.Exactly == nil {
 				continue
@@ -758,7 +768,7 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 			continue
 		}
 
-		if managed && partConfig.APIVersion != "" && partConfig.APIVersion != controller.PartitionConfigAPIVersion {
+		if managed && partConfig.APIVersion != "" && partConfig.APIVersion != controller.PartitionConfigAPIVersion && partConfig.APIVersion != controller.PartitionConfigV1Alpha2 {
 			return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has unsupported PartitionConfig apiVersion %q", deviceClassName, partConfig.APIVersion)}
 		}
 

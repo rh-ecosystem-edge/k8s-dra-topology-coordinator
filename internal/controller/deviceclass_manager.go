@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
@@ -61,6 +62,7 @@ const (
 	// requires a new version, so a webhook that does not understand it denies
 	// the claim instead of silently expanding it without that field.
 	PartitionConfigAPIVersion = CoordinatorDriverName + "/v1alpha1"
+	PartitionConfigV1Alpha2   = CoordinatorDriverName + "/v1alpha2"
 )
 
 // CouplingLevel indicates the topology tightness of a partition's constraints.
@@ -90,6 +92,7 @@ type PartitionConfig struct {
 
 // SubResourceConfig defines a sub-resource that a partition contains.
 type SubResourceConfig struct {
+	Name string `json:"name,omitempty"`
 	// SourceDriver identifies the driver used for topology satisfiability checks.
 	// It may differ from DeviceClass when a mode-specific class is requested.
 	SourceDriver string `json:"sourceDriver,omitempty"`
@@ -132,22 +135,42 @@ func (c *PartitionConfig) Validate() error {
 	if len(c.SubResources) == 0 {
 		return fmt.Errorf("subResources must not be empty")
 	}
-	seenClasses := make(map[string]struct{}, len(c.SubResources))
+	seenClasses := make(map[string]bool, len(c.SubResources))
+	seenNames := make(map[string]struct{}, len(c.SubResources))
+	repeatedClass := false
 	alignable := make(map[string]struct{}, 2*len(c.SubResources))
 	for i, sr := range c.SubResources {
 		if sr.DeviceClass == "" {
 			return fmt.Errorf("subResources[%d] missing deviceClass", i)
 		}
-		if _, exists := seenClasses[sr.DeviceClass]; exists {
-			return fmt.Errorf("subResources[%d] has duplicate deviceClass %q", i, sr.DeviceClass)
+		if sr.Name != "" && len(validation.IsDNS1123Label(sr.Name)) > 0 {
+			return fmt.Errorf("subResources[%d] has invalid name %q", i, sr.Name)
 		}
-		seenClasses[sr.DeviceClass] = struct{}{}
+		if named, exists := seenClasses[sr.DeviceClass]; exists {
+			if c.APIVersion != PartitionConfigV1Alpha2 || !named || sr.Name == "" {
+				return fmt.Errorf("subResources[%d] has duplicate deviceClass %q", i, sr.DeviceClass)
+			}
+			repeatedClass = true
+		}
+		seenClasses[sr.DeviceClass] = sr.Name != ""
+		identity := naming.Sanitize(sr.DeviceClass, "sub")
+		if sr.Name != "" {
+			identity = sr.Name
+		}
+		if _, exists := seenNames[identity]; exists {
+			return fmt.Errorf("subResources[%d] has duplicated request identity %q", i, identity)
+		}
+		seenNames[identity] = struct{}{}
+		if c.APIVersion != PartitionConfigV1Alpha2 && sr.Name != "" {
+			return fmt.Errorf("subResources[%d] name requires v1alpha2", i)
+		}
 		// Classes published before alignments used DeviceClass names
 		// referenced the source driver instead; accept both until they are rewritten.
 		if sr.SourceDriver != "" {
 			alignable[sr.SourceDriver] = struct{}{}
 		}
 		alignable[sr.DeviceClass] = struct{}{}
+		alignable[identity] = struct{}{}
 		if sr.Count < 1 {
 			return fmt.Errorf("subResources[%d] count must be positive", i)
 		}
@@ -162,6 +185,9 @@ func (c *PartitionConfig) Validate() error {
 		}
 	}
 	for i, alignment := range c.Alignments {
+		if alignment.Scope != "" && (c.APIVersion != PartitionConfigV1Alpha2 || alignment.Scope != "group") {
+			return fmt.Errorf("alignments[%d] has unsupported scope %q", i, alignment.Scope)
+		}
 		if alignment.Attribute == "" {
 			return fmt.Errorf("alignments[%d] missing attribute", i)
 		}
@@ -170,6 +196,48 @@ func (c *PartitionConfig) Validate() error {
 				return fmt.Errorf("alignments[%d] references unknown deviceClass %q", i, request)
 			}
 		}
+		if alignment.Scope == "group" {
+			members := make(map[string]bool, len(alignment.Requests))
+			for _, request := range alignment.Requests {
+				members[request] = true
+			}
+			if len(members) != len(c.SubResources) {
+				return fmt.Errorf("alignments[%d] group scope must cover every subResource", i)
+			}
+			for _, sr := range c.SubResources {
+				if !members[sr.Name] {
+					return fmt.Errorf("alignments[%d] group scope must cover every subResource", i)
+				}
+			}
+		}
+	}
+	if repeatedClass {
+		covered := false
+		for _, alignment := range c.Alignments {
+			if alignment.Scope != "group" || alignment.Enforcement != EnforcementRequired {
+				continue
+			}
+			members := make(map[string]bool, len(alignment.Requests))
+			for _, name := range alignment.Requests {
+				members[name] = true
+			}
+			if len(members) != len(c.SubResources) {
+				continue
+			}
+			covered = true
+			for _, sr := range c.SubResources {
+				if !members[sr.Name] {
+					covered = false
+					break
+				}
+			}
+			if covered {
+				break
+			}
+		}
+		if !covered {
+			return fmt.Errorf("repeated deviceClass requires a required group alignment covering every named subResource")
+		}
 	}
 	return nil
 }
@@ -177,6 +245,7 @@ func (c *PartitionConfig) Validate() error {
 // AlignmentConfig defines a matchAttribute constraint for the combined claim.
 type AlignmentConfig struct {
 	Attribute   string          `json:"attribute"`
+	Scope       string          `json:"scope,omitempty"`
 	Requests    []string        `json:"requests"`
 	Enforcement EnforcementMode `json:"enforcement"`
 }
@@ -192,6 +261,9 @@ func sortPartitionConfig(config *PartitionConfig) {
 		a, b := config.SubResources[i], config.SubResources[j]
 		if a.DeviceClass != b.DeviceClass {
 			return a.DeviceClass < b.DeviceClass
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
 		}
 		return a.Count < b.Count
 	})
@@ -1379,6 +1451,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		mode             OfferingMode
 		requests         map[string]RequestContract
 		deviceProfiles   map[string]string
+		entries          []GroupingDevice
+		matchAttribute   string
 		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		autoDetected     bool           // identical across instances, like intent
@@ -1397,6 +1471,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				mode:             entry.representative.Mode,
 				requests:         entry.representative.Requests,
 				deviceProfiles:   entry.representative.DeviceProfiles,
+				entries:          append([]GroupingDevice(nil), entry.representative.Entries...),
+				matchAttribute:   entry.representative.MatchAttribute,
 				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				autoDetected:     entry.representative.AutoDetected,
@@ -1424,6 +1500,8 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			Mode:           state.mode,
 			Requests:       state.requests,
 			DeviceProfiles: state.deviceProfiles,
+			Entries:        state.entries,
+			MatchAttribute: state.matchAttribute,
 			Intent:         state.intent,
 			AutoDetected:   state.autoDetected,
 			DeviceCounts:   intersectedCounts,
@@ -1517,7 +1595,9 @@ func groupingRequestContractKey(inst GroupingInstance) string {
 		Mode           OfferingMode               `json:"mode,omitempty"`
 		Requests       map[string]RequestContract `json:"requests,omitempty"`
 		DeviceProfiles map[string]string          `json:"deviceProfiles,omitempty"`
-	}{Mode: mode, Requests: inst.Requests, DeviceProfiles: inst.DeviceProfiles}
+		Entries        []GroupingDevice           `json:"entries,omitempty"`
+		MatchAttribute string                     `json:"matchAttribute,omitempty"`
+	}{Mode: mode, Requests: inst.Requests, DeviceProfiles: inst.DeviceProfiles, Entries: inst.Entries, MatchAttribute: inst.MatchAttribute}
 	data, _ := json.Marshal(contract)
 	return string(data)
 }
@@ -1589,6 +1669,48 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 	}
 	if config.Mode == "" {
 		config.Mode = OfferingModeContainer
+	}
+	named := inst.MatchAttribute != ""
+	for _, entry := range inst.Entries {
+		if entry.Name != "" {
+			named = true
+		}
+	}
+	if named {
+		config.APIVersion = PartitionConfigV1Alpha2
+		var names []string
+		for _, entry := range inst.Entries {
+			requestClass := entry.RequestClass
+			if requestClass == "" {
+				requestClass = entry.Class
+			}
+			driver := entry.RequestDriver
+			if driver == "" {
+				driver = m.driverForClass(entry.Class)
+			}
+			sr := SubResourceConfig{Name: entry.Name, SourceDriver: driver, DeviceClass: requestClass, Count: entry.Count, Capacity: entry.Capacity, Passthrough: config.Mode == OfferingModePassthrough && entry.Passthrough, Selectors: append([]string(nil), entry.Selectors...), Opaque: entry.Opaque}
+			if entry.Profile != "" {
+				sr.Selectors = append(sr.Selectors, fmt.Sprintf(`device.attributes[%q].profile == %q`, m.driverForClass(entry.Class), entry.Profile))
+			}
+			if includeNUMA && len(inst.NUMANodes) > 0 {
+				attr, ok := m.rules.GetNUMAAttributeForDriver(driver)
+				if !ok {
+					attr = AttrNUMANode
+				} else if !strings.Contains(attr, "/") {
+					attr = driver + "/" + attr
+				}
+				if cel := BuildNUMACELSelector(attr, inst.NUMANodes); cel != "" {
+					sr.Selectors = append(sr.Selectors, cel)
+				}
+			}
+			config.SubResources = append(config.SubResources, sr)
+			names = append(names, entry.Name)
+		}
+		if inst.MatchAttribute != "" {
+			config.Alignments = append(config.Alignments, AlignmentConfig{Attribute: inst.MatchAttribute, Requests: names, Enforcement: EnforcementRequired, Scope: "group"})
+		}
+		sortPartitionConfig(&config)
+		return config
 	}
 
 	for driverClass, count := range inst.DeviceCounts {

@@ -240,6 +240,27 @@ func TestBuildContractReportsMIGProfileWithoutSelectors(t *testing.T) {
 	assert.Contains(t, table.String(), "GPU partition profile:  1g.10gb")
 }
 
+func TestBuildContractReportsMixedMIGRequestNames(t *testing.T) {
+	config := controller.PartitionConfig{APIVersion: controller.PartitionConfigV1Alpha2, Kind: "PartitionConfig", SubResources: []controller.SubResourceConfig{
+		{Name: "large", DeviceClass: "mig.nvidia.com", Count: 1},
+		{Name: "small", DeviceClass: "mig.nvidia.com", Count: 1},
+	}, Alignments: []controller.AlignmentConfig{{Attribute: controller.AttrPCIBusID, Scope: "group", Enforcement: controller.EnforcementRequired, Requests: []string{"large", "small"}}}}
+	raw, err := json.Marshal(config)
+	require.NoError(t, err)
+	dc := class("mixed-mig", map[string]string{controller.LabelManaged: "true", controller.LabelGrouping: "mixed-mig"}, nil)
+	dc.Spec.Config[0].Opaque = &resourcev1.OpaqueDeviceConfiguration{Driver: controller.CoordinatorDriverName, Parameters: runtime.RawExtension{Raw: raw}}
+	contract, err := buildContract(dc)
+	require.NoError(t, err)
+	require.Len(t, contract.Requests, 2)
+	assert.Equal(t, "large", contract.Requests[0].Name)
+	assert.Equal(t, "small", contract.Requests[1].Name)
+	var table bytes.Buffer
+	require.NoError(t, writeContractTable(&table, contract))
+	assert.Contains(t, table.String(), "Request name:")
+	assert.Contains(t, table.String(), "large")
+	assert.Contains(t, table.String(), "small")
+}
+
 func TestRunExplainFixedNumaReportsTopologyLevelAndPlacement(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	dc := class("numa", map[string]string{

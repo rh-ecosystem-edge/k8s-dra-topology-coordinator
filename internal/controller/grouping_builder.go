@@ -28,7 +28,9 @@ type GroupingInstance struct {
 	AutoDetected bool
 	// Alignment is the topology attribute this instance matched on
 	// (e.g., "pcieRoot", "numaNode").
-	Alignment string
+	Alignment      string
+	MatchAttribute string
+	Entries        []GroupingDevice
 
 	// NUMANodes lists the NUMA nodes spanned by this instance.
 	NUMANodes []int64
@@ -323,6 +325,9 @@ func (b *GroupingBuilder) nodeHasRequiredClasses(
 	devices []TopologyDevice,
 	grouping DeviceGrouping,
 ) bool {
+	if grouping.MatchAttribute != "" {
+		return true
+	}
 	reps, slices := b.classCandidates(devices)
 	for _, gd := range grouping.Devices {
 		if len(available(gd, reps, slices)) < gd.Count {
@@ -342,6 +347,9 @@ func (b *GroupingBuilder) findInstances(
 	grouping DeviceGrouping,
 	alignment string,
 ) []GroupingInstance {
+	if grouping.MatchAttribute != "" {
+		return b.findMatchedInstances(nodeName, devices, grouping, alignment)
+	}
 	groups := b.groupByAlignment(devices, alignment)
 
 	// Sort group keys for deterministic output
@@ -478,6 +486,8 @@ func (b *GroupingBuilder) buildInstance(
 		Intent:             grouping.Intent,
 		AutoDetected:       grouping.AutoDetected,
 		Alignment:          alignment,
+		MatchAttribute:     grouping.MatchAttribute,
+		Entries:            append([]GroupingDevice(nil), grouping.Devices...),
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),
 		Requests:           make(map[string]RequestContract),

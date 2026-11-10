@@ -86,6 +86,7 @@ Device groupings describe a named combination of DRA device classes that should 
 | --- | --- | --- |
 | `name` | yes | Sanitizes to a DNS-1123 label of at most 56 characters |
 | `alignment` | yes | `pcieRoot`, `numaNode`, or `socket` |
+| `matchAttribute` | no | Fully qualified scalar DRA attribute shared by every device in one expanded grouping; required for repeated classes |
 | `fallback` | no | Same values as `alignment`; opt-in looser level |
 | `devices` | yes | YAML list, non-empty (see below) |
 | `mode` | no | `container` (default) or `passthrough` |
@@ -100,10 +101,12 @@ Device groupings describe a named combination of DRA device classes that should 
 
 | Key | Required | Purpose |
 | --- | --- | --- |
-| `class` | yes | Topology class used to find devices; unique within the grouping |
+| `class` | yes | Topology class used to find devices; repeated entries need distinct names and `matchAttribute` |
+| `name` | no | DNS-label request identity; required when `matchAttribute` is set and otherwise omitted |
 | `count` | yes | Positive integer |
 | `capacity` | no | Map of consumable DRA capacity requests |
-| `requestClass` | no | Driver-owned DeviceClass used in the expanded claim; defaults to `class`; unique within the grouping |
+| `requestClass` | no | Driver-owned DeviceClass used in the expanded claim; defaults to `class` |
+| `profile` | no | Device profile selector, such as `4g.40gb` |
 | `requestDriver` | no | Driver that serves `requestClass`; requires `requestClass` |
 | `passthrough` | no | Marks a physical device exposed to a VM; needs `mode: passthrough` |
 | `selectors` | no | CEL selectors copied to the sub-request |
@@ -136,7 +139,29 @@ data:
 
 `alignment` is the preferred co-location level. `fallback` is opt-in: it evaluates remaining devices at a looser level and publishes separate fallback instances; it is never added automatically and it does not stack a NUMA constraint on top of a PCIe-root class. An aggregate grouping preserves one alignment level without pinning a particular value, so `alignment: numaNode` means all expanded requests must share one NUMA node while the scheduler chooses which node. If a grouping produces both preferred and fallback instances, the aggregate does not encode both alternatives; select a topology-specific class when the alignment choice matters.
 
-Keys inside `devices` are matched strictly: an unknown or duplicate key (for example `passthru:` instead of `passthrough:`) rejects the ConfigMap with an error naming the key. Matching stays case-insensitive, so `Class:` is still accepted. Unknown top-level `data` keys are ignored with a warning. A ConfigMap rejected on initial load is absent from the grouping store, so its DeviceClasses are removed on the next reconcile; an invalid update keeps the last valid cached grouping until the update is corrected. Before upgrading, check every `devices:` block for keys outside the supported set: `class`, `requestClass`, `count`, `capacity`, `passthrough`, `selectors`, and `opaque`.
+For different MIG profiles on one GPU, give every entry a unique `name` and set `matchAttribute: resource.kubernetes.io/pciBusID`. The coordinator publishes the grouping only when distinct profile devices share a PCI bus ID and counter set and their combined usage fits every published shared counter. The generated claim has one required PCI bus ID constraint per expanded bundle. An outer claim request with count greater than one creates independent bundles. The driver must publish the PCI bus ID attribute and complete shared-counter capacities. Driver-specific match attributes need a topology info rule so the coordinator can read them. Install the new controller and webhook on every admission endpoint before adding a grouping that uses these fields.
+
+```yaml
+data:
+  name: nvidia-mig-mixed
+  alignment: pcieRoot
+  matchAttribute: resource.kubernetes.io/pciBusID
+  devices: |
+    - name: large
+      class: mig.nvidia.com
+      profile: 4g.40gb
+      count: 1
+    - name: medium
+      class: mig.nvidia.com
+      profile: 2g.20gb
+      count: 1
+    - name: small
+      class: mig.nvidia.com
+      profile: 1g.10gb
+      count: 1
+```
+
+Keys inside `devices` are matched strictly: an unknown or duplicate key (for example `passthru:` instead of `passthrough:`) rejects the ConfigMap with an error naming the key. Matching stays case-insensitive, so `Class:` is still accepted. Unknown top-level `data` keys are ignored with a warning. A ConfigMap rejected on initial load is absent from the grouping store, so its DeviceClasses are removed on the next reconcile; an invalid update keeps the last valid cached grouping until the update is corrected. Before upgrading, check every `devices:` block for keys outside the supported set: `name`, `class`, `requestClass`, `requestDriver`, `profile`, `count`, `capacity`, `passthrough`, `selectors`, and `opaque`.
 
 ### Published classes and naming
 
