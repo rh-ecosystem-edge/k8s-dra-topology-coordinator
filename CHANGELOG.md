@@ -7,9 +7,10 @@ Notable changes. Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - `--health-port` controller flag (default `8081`); the Helm chart passes `controller.healthPort` to it.
 - `docs/configuration.md`: reference for topology-rule and device-grouping ConfigMaps.
-- Controller flag, DeviceClass label/annotation, and `nodepartitionctl` global-flag tables in the README.
+- Controller flag, DeviceClass label/annotation, and `dratopoctl` global-flag tables in the README.
 
 ### Changed
+- Renamed the `nodepartitionctl` CLI to `dratopoctl` (binary, `cmd/` path, release assets, docs, demos).
 - The chart now passes `--health-port`; upgrade the chart and controller image together (v0.2.0 images reject the flag).
 - The controller version reported on the health endpoint is injected at build time (`-X main.version`) by `make build`, the Dockerfile `VERSION` build arg, and the release workflow. Unstamped builds report `dev`.
 - `examples/intent-workload-gpu-inference.yaml` sets `offering: "true"`.

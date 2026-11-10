@@ -12,7 +12,7 @@ The recording covers both configuration layers:
   trusted ConfigMap namespace; and
 - the device-grouping ConfigMaps that produce the MI300X offering catalog.
 
-It then follows the generated state through `nodepartitionctl`, managed
+It then follows the generated state through `dratopoctl`, managed
 DeviceClasses, and `dra-inspect` topology, slice, attribute, and capacity
 checks. The checked-in `configmaps.yaml` is a normalized snapshot of the live
 grouping configuration and is displayed for reference; the tape does not
@@ -27,7 +27,7 @@ vhs demo.tape
 The recording expects:
 
 - Kubernetes access to the live cluster (set `KUBECONFIG` to its kubeconfig);
-- Helm, `kubectl`, `dra-inspect`, and `nodepartitionctl` on `PATH`;
+- Helm, `kubectl`, `dra-inspect`, and `dratopoctl` on `PATH`;
 - the topology coordinator and AMD, CPU, memory, and network DRA drivers
   already running; and
 - the MI300X grouping ConfigMaps and generated catalog already present.

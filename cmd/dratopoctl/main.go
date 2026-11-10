@@ -1,4 +1,4 @@
-// Command nodepartitionctl is a read-only catalog client for the Node
+// Command dratopoctl is a read-only catalog client for the Node
 // Partition Topology Coordinator. It lists the DeviceClasses the coordinator
 // manages and the offerings built on them.
 package main
@@ -38,7 +38,7 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "nodepartitionctl",
+		Use:           "dratopoctl",
 		Short:         "Discover Node Partition Topology Coordinator offerings",
 		SilenceUsage:  true,
 		SilenceErrors: true,

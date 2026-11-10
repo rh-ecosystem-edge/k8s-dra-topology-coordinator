@@ -30,13 +30,13 @@ Sleep 0.5s
 Show
 
 # 1. Show the offering catalog.
-Type "nodepartitionctl offerings list"
+Type "dratopoctl offerings list"
 Enter
 Sleep 5s
 Type "clear"
 Enter
 Sleep 0.5s
-Type "nodepartitionctl offerings explain mi300x-inference-numa"
+Type "dratopoctl offerings explain mi300x-inference-numa"
 Enter
 Sleep 6s
 Type "clear"

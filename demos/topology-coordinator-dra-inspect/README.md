@@ -8,7 +8,7 @@ MI300X cluster.
 
 It uses the existing `mi300x-inference-numa` offering. The offering expands to
 one AMD GPU plus 4 CPUs and 4 GiB of consumable memory on a single NUMA-local
-CPU/memory device. `nodepartitionctl` explains the offering contract; `dra-inspect` shows
+CPU/memory device. `dratopoctl` explains the offering contract; `dra-inspect` shows
 the published topology, device slices and attributes, claim allocation,
 alignment, and consumable-capacity validation.
 
@@ -29,7 +29,7 @@ vhs demo.tape
 The recording expects:
 
 - Kubernetes access to the live cluster (set `KUBECONFIG` to its kubeconfig)
-- `dra-inspect` and `nodepartitionctl` on `PATH`
+- `dra-inspect` and `dratopoctl` on `PATH`
 - the topology coordinator and capacity-backed `mi300x-inference-numa` offering already deployed
 - the AMD GPU, CPU, memory, and network DRA drivers already running
 

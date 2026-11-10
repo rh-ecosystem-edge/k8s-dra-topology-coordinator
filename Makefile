@@ -15,7 +15,7 @@ GOARCH=$(shell go env GOARCH)
 # Build the controller
 build: $(BINARY_DIR)
 	CGO_ENABLED=0 $(GO) build -ldflags="$(LDFLAGS)" -trimpath -o $(BINARY) ./cmd/nodepartition-controller
-	CGO_ENABLED=0 $(GO) build -ldflags="-s -w -extldflags=-static" -trimpath -o $(BINARY_DIR)/nodepartitionctl ./cmd/nodepartitionctl
+	CGO_ENABLED=0 $(GO) build -ldflags="-s -w -extldflags=-static" -trimpath -o $(BINARY_DIR)/dratopoctl ./cmd/dratopoctl
 
 # Create binary directory
 $(BINARY_DIR):

@@ -66,7 +66,7 @@ Enter
 Sleep 0.5s
 
 # 3. Inspect the generated offering catalog.
-Type "nodepartitionctl offerings list --all | more"
+Type "dratopoctl offerings list --all | more"
 Enter
 Sleep 10s
 Type " "
@@ -82,13 +82,13 @@ Sleep 8s
 Type "clear"
 Enter
 Sleep 0.5s
-Type "nodepartitionctl offerings get mi300x-inference-numa"
+Type "dratopoctl offerings get mi300x-inference-numa"
 Enter
 Sleep 6s
 Type "clear"
 Enter
 Sleep 0.5s
-Type "nodepartitionctl offerings explain mi300x-inference-numa"
+Type "dratopoctl offerings explain mi300x-inference-numa"
 Enter
 Sleep 8s
 Type "clear"

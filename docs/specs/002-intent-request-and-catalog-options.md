@@ -1,6 +1,6 @@
 # Intent Request and Offering Catalog Options
 
-**Status:** Option A implemented in v0.2.0 (explicit `offering` label, aggregate marker, duplicate-name failure, and `nodepartitionctl offerings list|get|explain`). Options B and C remain open design options.
+**Status:** Option A implemented in v0.2.0 (explicit `offering` label, aggregate marker, duplicate-name failure, and `dratopoctl offerings list|get|explain`). Options B and C remain open design options.
 
 **Scope:** First-class workload intent requests and discoverable hardware offerings.
 
@@ -166,8 +166,8 @@ Limitations:
 Use coordinator-managed DeviceClasses as the catalog source and add a read-only CLI:
 
 ```sh
-nodepartitionctl offerings list
-nodepartitionctl offerings get gpu-inference
+dratopoctl offerings list
+dratopoctl offerings get gpu-inference
 ```
 
 The output should include:
@@ -255,7 +255,7 @@ Existing ConfigMaps should remain supported as a compatibility source. Both Conf
 
 ## Recommended progression
 
-Steps 1 and 2 are implemented in the pull request that adds `nodepartitionctl`: the explicit `offering` key, the `aggregate`, `mode`, and `source` labels, failing reconcile on duplicate grouping names, the cross-kind publish guard, and the `offerings list|get` CLI.
+Steps 1 and 2 are implemented in the pull request that adds `dratopoctl`: the explicit `offering` key, the `aggregate`, `mode`, and `source` labels, failing reconcile on duplicate grouping names, the cross-kind publish guard, and the `offerings list|get` CLI.
 
 1. Make aggregate offering names stable, collision-checked, and explicitly labeled.
 2. Add a catalog CLI using the labeled aggregate DeviceClasses.
