@@ -275,7 +275,7 @@ kubectl get deviceclasses -l nodepartition.dra.k8s.io/visibility=public \
 Every grouping DeviceClass also carries `nodepartition.dra.k8s.io/mode` (`container` or `passthrough`) and `nodepartition.dra.k8s.io/source` (`configmap` or `auto`). Aggregate classes carry `nodepartition.dra.k8s.io/aggregate=true`. The `offering` label is set only from the explicit `offering: "true"` key; it is never inferred from other metadata, and it marks the class as a stable request target.
 
 
-`offering: "true"` is the only thing that sets the `offering` label. The other metadata keys only publish discovery labels and annotations on aggregate classes. (In code, `IntentMetadata.IsOffering()` means "has any metadata" and is unrelated to the `offering` label.) List published entries with [`nodepartitionctl`](../README.md#discover-offerings-with-nodepartitionctl).
+`offering: "true"` is the only thing that sets the `offering` label. The other metadata keys only publish discovery labels and annotations on aggregate classes. (In code, `IntentMetadata.IsOffering()` means "has any metadata" and is unrelated to the `offering` label.) List published entries with [`dratopoctl`](../README.md#discover-offerings-with-dratopoctl).
 
 
 `categories` and `workloadTypes` are comma-joined annotations, so Kubernetes label selectors cannot query those values. Intent metadata currently supports discovery and cataloging only; request-level claim rejection based on categories or workload types is deferred, and the webhook expands claims from the DeviceClass scheduling configuration independently of these annotations.

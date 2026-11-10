@@ -213,17 +213,17 @@ All keys use the fixed prefix `nodepartition.dra.k8s.io/`.
 | `display-name`, `description`, `categories`, `workload-types` | annotation | From grouping intent metadata |
 | `expanded-requests` | annotation on expanded claims | Mapping from original to expanded request names, written by the webhook |
 
-## Discover offerings with nodepartitionctl
+## Discover offerings with dratopoctl
 
-`nodepartitionctl` accepts `--kubeconfig`, `--context`, and `-o table|json` on every command. Listing needs `get` and `list` on `deviceclasses`.
+`dratopoctl` accepts `--kubeconfig`, `--context`, and `-o table|json` on every command. Listing needs `get` and `list` on `deviceclasses`.
 
 ```sh
-nodepartitionctl offerings list            # curated offerings only
-nodepartitionctl offerings list --all      # plus grouping, auto-detected, and partition classes
-nodepartitionctl offerings get gpu-inference -o json
-nodepartitionctl offerings get gpu-inference-rail0 -o json
-nodepartitionctl offerings explain gpu-inference
-nodepartitionctl offerings explain gpu-inference -o json
+dratopoctl offerings list            # curated offerings only
+dratopoctl offerings list --all      # plus grouping, auto-detected, and partition classes
+dratopoctl offerings get gpu-inference -o json
+dratopoctl offerings get gpu-inference-rail0 -o json
+dratopoctl offerings explain gpu-inference
+dratopoctl offerings explain gpu-inference -o json
 ```
 
 Entries have a `kind`: `offering` (aggregate class with `offering=true`), `grouping` (any other ConfigMap grouping), `auto-detected` (coordinator-derived PCIe pairing), or `partition` (fixed-hierarchy class). Per-instance classes appear as `variants` of their aggregate. Output never includes class selectors or opaque driver configuration. Names of `grouping`, `auto-detected`, and `partition` entries can change with topology, so only `offering` entries are stable request targets.
@@ -231,7 +231,7 @@ Entries have a `kind`: `offering` (aggregate class with `offering=true`), `group
 Enable shell completion with the generated Cobra script:
 
 ```sh
-echo 'source <(nodepartitionctl completion bash)' >> ~/.bashrc
+echo 'source <(dratopoctl completion bash)' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -325,7 +325,7 @@ The Helm chart declares a default cert-manager issuer of `selfsigned-issuer` but
 ## Build and test
 
 ```sh
-make build          # bin/nodepartition-controller and bin/nodepartitionctl
+make build          # bin/nodepartition-controller and bin/dratopoctl
 make setup-envtest  # download Kubernetes 1.34 envtest assets
 make test           # unit, integration, and property tests
 make test-coverage
@@ -342,17 +342,17 @@ docker build -t nodepartition-controller:dev .
 
 The Dockerfile uses a Go 1.26 builder image and produces a non-root distroless image. The Helm chart's default image repository and tag can be overridden with `controller.image.repository` and `controller.image.tag`. A source checkout does not publish an image automatically, so use the local-image override below when installing from source.
 
-Tagged releases also publish `nodepartitionctl` archives for Linux `amd64` and `arm64` on the GitHub Release page. Download the archive for your host, verify it with `checksums.txt`, and place the extracted binary on your `PATH`:
+Tagged releases also publish `dratopoctl` archives for Linux `amd64` and `arm64` on the GitHub Release page. Download the archive for your host, verify it with `checksums.txt`, and place the extracted binary on your `PATH`:
 
 ```sh
 VERSION=0.2.0
 ARCH=amd64 # use arm64 on aarch64 hosts
-curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/dratopoctl-${VERSION}-linux-${ARCH}.tar.gz"
 curl -LO "https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/releases/download/v${VERSION}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
-tar -xzf "nodepartitionctl-${VERSION}-linux-${ARCH}.tar.gz"
+tar -xzf "dratopoctl-${VERSION}-linux-${ARCH}.tar.gz"
 mkdir -p ~/.local/bin
-install -m 0755 nodepartitionctl ~/.local/bin/nodepartitionctl
+install -m 0755 dratopoctl ~/.local/bin/dratopoctl
 ```
 
 ## Helm installation

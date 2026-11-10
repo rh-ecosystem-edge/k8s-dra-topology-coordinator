@@ -46,13 +46,13 @@ Sleep 5s
 Show
 
 # 1. Discover the user-facing passthrough offering.
-Type "nodepartitionctl offerings list"
+Type "dratopoctl offerings list"
 Enter
 Sleep 10s
 Type "clear"
 Enter
 Sleep 5s
-Type "nodepartitionctl offerings explain mi300x-rdma-rail"
+Type "dratopoctl offerings explain mi300x-rdma-rail"
 Enter
 Sleep 10s
 Type "clear"

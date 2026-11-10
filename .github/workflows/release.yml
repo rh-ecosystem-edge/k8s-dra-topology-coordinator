@@ -75,26 +75,26 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build nodepartitionctl release assets
+      - name: Build dratopoctl release assets
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           for ARCH in amd64 arm64; do
-            ASSET="nodepartitionctl-${VERSION}-linux-${ARCH}"
+            ASSET="dratopoctl-${VERSION}-linux-${ARCH}"
             CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build \
               -ldflags="-s -w -extldflags=-static" \
               -trimpath \
-              -o dist/nodepartitionctl \
-              ./cmd/nodepartitionctl
-            tar -C dist -czf "dist/${ASSET}.tar.gz" nodepartitionctl
-            rm dist/nodepartitionctl
+              -o dist/dratopoctl \
+              ./cmd/dratopoctl
+            tar -C dist -czf "dist/${ASSET}.tar.gz" dratopoctl
+            rm dist/dratopoctl
           done
-          (cd dist && sha256sum nodepartitionctl-*.tar.gz > checksums.txt)
+          (cd dist && sha256sum dratopoctl-*.tar.gz > checksums.txt)
 
-      - name: Publish nodepartitionctl release assets
+      - name: Publish dratopoctl release assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/nodepartitionctl-*.tar.gz
+            dist/dratopoctl-*.tar.gz
             dist/checksums.txt
