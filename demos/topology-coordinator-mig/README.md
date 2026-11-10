@@ -48,8 +48,12 @@ vhs demos/topology-coordinator-mig/demo.tape
 ```
 
 The recording shows the MIG profile and NUMA placement contract, the minimal
-claim and Pod, the allocated claim, and the topology check. Its cleanup removes
-only `demo-nvidia-mig-numa-pod` and `demo-nvidia-mig-numa`.
+claim and Pod, the allocation, compact and full topology views, shared-counter
+accounting, and the topology check. The counter view includes the cluster's
+DCGM Exporter admin-access claim. While the demo MIG claim is active,
+`dra-inspect` reports GPU 0's shared counters as overcommitted; after cleanup,
+the exporter-only counter view is within capacity. The recording cleanup
+removes only `demo-nvidia-mig-numa-pod` and `demo-nvidia-mig-numa`.
 
 ## Files
 

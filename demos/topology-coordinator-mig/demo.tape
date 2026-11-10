@@ -78,6 +78,30 @@ Sleep 7s
 Type "clear"
 Enter
 Sleep 0.5s
+Type "dra-inspect inspect topology --compact"
+Enter
+Sleep 6s
+Type "clear"
+Enter
+Sleep 0.5s
+Type "dra-inspect inspect topology | more"
+Enter
+Sleep 6s
+Type " "
+Sleep 6s
+Type " "
+Sleep 6s
+Type "clear"
+Enter
+Sleep 0.5s
+Type "dra-inspect check counters | more"
+Enter
+Sleep 6s
+Type " "
+Sleep 6s
+Type "clear"
+Enter
+Sleep 0.5s
 Type "dra-inspect check topology"
 Enter
 Sleep 7s
