@@ -52,6 +52,7 @@ const (
 
 // GroupingDevice specifies a device class and count within a grouping.
 type GroupingDevice struct {
+	Name string `json:"name,omitempty"`
 	// Class identifies the topology class used to match discovered devices.
 	Class string `json:"class"`
 	// RequestClass optionally selects a different driver-owned DeviceClass in
@@ -98,7 +99,8 @@ type DeviceGrouping struct {
 	Name string
 	// Alignment is the preferred topology attribute for co-location
 	// (e.g., "pcieRoot", "numaNode", "socket").
-	Alignment string
+	Alignment      string
+	MatchAttribute string
 	// Fallback is an optional looser alignment attribute to use when
 	// the preferred alignment is unsatisfiable for some device instances.
 	Fallback string
@@ -175,6 +177,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 		devicesCopy := make([]GroupingDevice, len(g.Devices))
 		for i, d := range g.Devices {
 			gd := GroupingDevice{
+				Name:          d.Name,
 				Class:         d.Class,
 				RequestClass:  d.RequestClass,
 				RequestDriver: d.RequestDriver,
@@ -203,6 +206,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 		result = append(result, DeviceGrouping{
 			Name:            g.Name,
 			Alignment:       g.Alignment,
+			MatchAttribute:  g.MatchAttribute,
 			Fallback:        g.Fallback,
 			Mode:            g.Mode,
 			Rail:            g.Rail,
@@ -218,7 +222,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 // knownGroupingKeys are the data keys parseDeviceGrouping reads.
 var knownGroupingKeys = map[string]struct{}{
 	"alignment": {}, "categories": {}, "description": {}, "devices": {}, "displayName": {},
-	"fallback": {}, "intentLevel": {}, "mode": {}, "name": {}, "offering": {},
+	"fallback": {}, "intentLevel": {}, "matchAttribute": {}, "mode": {}, "name": {}, "offering": {},
 	"rail": {}, "visibility": {}, "workloadTypes": {},
 }
 
@@ -339,26 +343,48 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 
 	seenClasses := make(map[string]string, len(devices))
-	seenRequestClasses := make(map[string]struct{}, len(devices))
+	seenProfiles := make(map[string]string, len(devices))
+	seenRequestClasses := make(map[string]string, len(devices))
+	seenNames := make(map[string]struct{}, len(devices))
+	g.MatchAttribute = cm.Data["matchAttribute"]
+	if g.MatchAttribute != "" && (!strings.Contains(g.MatchAttribute, "/") || len(validation.IsQualifiedName(g.MatchAttribute)) > 0) {
+		return g, fmt.Errorf("invalid matchAttribute %q", g.MatchAttribute)
+	}
 	for i, d := range devices {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
 		}
-		if profile, exists := seenClasses[d.Class]; exists {
-			if profile != d.Profile {
+		if g.MatchAttribute != "" && d.Name == "" {
+			return g, fmt.Errorf("device[%d] name is required with matchAttribute", i)
+		}
+		if d.Name != "" {
+			if g.MatchAttribute == "" {
+				return g, fmt.Errorf("device[%d] name requires matchAttribute", i)
+			}
+			if len(validation.IsDNS1123Label(d.Name)) > 0 {
+				return g, fmt.Errorf("device[%d] has invalid name %q", i, d.Name)
+			}
+			if _, exists := seenNames[d.Name]; exists {
+				return g, fmt.Errorf("device[%d] has duplicate name %q", i, d.Name)
+			}
+			seenNames[d.Name] = struct{}{}
+		}
+		if previous, exists := seenClasses[d.Class]; exists && (previous == "" || d.Name == "" || g.MatchAttribute == "") {
+			if seenProfiles[d.Class] != d.Profile {
 				return g, fmt.Errorf("device[%d] repeats class %q with a different profile; one profile per class is supported", i, d.Class)
 			}
 			return g, fmt.Errorf("device[%d] has duplicate class %q", i, d.Class)
 		}
-		seenClasses[d.Class] = d.Profile
+		seenClasses[d.Class] = d.Name
+		seenProfiles[d.Class] = d.Profile
 		requestClass := d.RequestClass
 		if requestClass == "" {
 			requestClass = d.Class
 		}
-		if _, exists := seenRequestClasses[requestClass]; exists {
+		if previous, exists := seenRequestClasses[requestClass]; exists && (previous == "" || d.Name == "" || g.MatchAttribute == "") {
 			return g, fmt.Errorf("device[%d] has duplicate requestClass %q", i, requestClass)
 		}
-		seenRequestClasses[requestClass] = struct{}{}
+		seenRequestClasses[requestClass] = d.Name
 		if d.Count < 1 {
 			return g, fmt.Errorf("device[%d] count must be >= 1, got %d", i, d.Count)
 		}

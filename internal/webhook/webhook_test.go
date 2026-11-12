@@ -397,6 +397,67 @@ func TestManagedPartitionConfigRejectsDuplicateRequestClasses(t *testing.T) {
 	assert.Contains(t, resp.Response.Result.Message, "duplicate deviceClass")
 }
 
+func TestMixedMIGExpansionKeepsBundlesIndependent(t *testing.T) {
+	config := controller.PartitionConfig{APIVersion: controller.PartitionConfigV1Alpha2, Kind: "PartitionConfig", SubResources: []controller.SubResourceConfig{
+		{Name: "large", DeviceClass: "mig.nvidia.com", SourceDriver: "gpu.nvidia.com", Count: 1, Selectors: []string{`device.attributes["gpu.nvidia.com"].profile == "4g.40gb"`}},
+		{Name: "medium", DeviceClass: "mig.nvidia.com", SourceDriver: "gpu.nvidia.com", Count: 1, Selectors: []string{`device.attributes["gpu.nvidia.com"].profile == "2g.20gb"`}},
+		{Name: "small", DeviceClass: "mig.nvidia.com", SourceDriver: "gpu.nvidia.com", Count: 1, Selectors: []string{`device.attributes["gpu.nvidia.com"].profile == "1g.10gb"`}},
+	}, Alignments: []controller.AlignmentConfig{{Attribute: controller.AttrPCIBusID, Scope: "group", Requests: []string{"large", "medium", "small"}, Enforcement: controller.EnforcementRequired}}}
+	require.NoError(t, config.Validate())
+	request := resourcev1.DeviceRequest{Name: "bundle", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "mixed-mig", Count: 2}}
+	expander := NewClaimExpander(fake.NewSimpleClientset())
+	requests, constraints, _, err := expander.expandRequest(request, &config)
+	require.NoError(t, err)
+	require.Len(t, requests, 6)
+	require.Len(t, constraints, 2)
+	assert.Equal(t, []string{"bundle-0-large", "bundle-0-medium", "bundle-0-small"}, constraints[0].Requests)
+	assert.Equal(t, []string{"bundle-1-large", "bundle-1-medium", "bundle-1-small"}, constraints[1].Requests)
+	for _, expanded := range requests {
+		assert.Equal(t, "mig.nvidia.com", expanded.Exactly.DeviceClassName)
+		require.Len(t, expanded.Exactly.Selectors, 1)
+	}
+	legacy := config
+	legacy.APIVersion = controller.PartitionConfigAPIVersion
+	assert.ErrorContains(t, legacy.Validate(), "name requires v1alpha2")
+	unsafe := config
+	unsafe.Alignments = nil
+	assert.ErrorContains(t, unsafe.Validate(), "requires a required group alignment")
+	partial := config
+	partial.Alignments = []controller.AlignmentConfig{{Attribute: controller.AttrPCIBusID, Scope: "group", Enforcement: controller.EnforcementRequired, Requests: []string{"large", "medium"}}}
+	assert.ErrorContains(t, partial.Validate(), "must cover every subResource")
+}
+
+func TestGroupAlignmentIncludesMultipleDevicesFromSingleRequest(t *testing.T) {
+	config := controller.PartitionConfig{
+		APIVersion: controller.PartitionConfigV1Alpha2,
+		Kind:       "PartitionConfig",
+		SubResources: []controller.SubResourceConfig{{
+			Name:         "small",
+			DeviceClass:  "mig.nvidia.com",
+			SourceDriver: "gpu.nvidia.com",
+			Count:        2,
+			Selectors:    []string{`device.attributes["gpu.nvidia.com"].profile == "1g.10gb"`},
+		}},
+		Alignments: []controller.AlignmentConfig{{
+			Attribute:   controller.AttrPCIBusID,
+			Scope:       "group",
+			Requests:    []string{"small"},
+			Enforcement: controller.EnforcementRequired,
+		}},
+	}
+	require.NoError(t, config.Validate())
+
+	request := resourcev1.DeviceRequest{Name: "bundle", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "mixed-mig", Count: 1}}
+	expander := NewClaimExpander(fake.NewSimpleClientset())
+	requests, constraints, _, err := expander.expandRequest(request, &config)
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+	assert.Equal(t, int64(2), requests[0].Exactly.Count)
+	require.Len(t, constraints, 1)
+	assert.Equal(t, []string{"bundle-small"}, constraints[0].Requests)
+	assert.Equal(t, resourcev1.FullyQualifiedName(controller.AttrPCIBusID), *constraints[0].MatchAttribute)
+}
+
 func TestManagedPartitionConfigRejectsUnknownAlignmentRequest(t *testing.T) {
 	partConfig := controller.PartitionConfig{
 		Kind:         "PartitionConfig",

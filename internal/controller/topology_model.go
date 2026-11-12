@@ -14,6 +14,7 @@ import (
 const (
 	AttrNUMANode = "resource.kubernetes.io/numaNode"
 	AttrPCIeRoot = "resource.kubernetes.io/pcieRoot"
+	AttrPCIBusID = "resource.kubernetes.io/pciBusID"
 	AttrSocket   = "nodepartition.dra.k8s.io/socket"
 )
 
@@ -55,6 +56,7 @@ type TopologyDevice struct {
 	NUMANode  *int64
 	NUMANodes []int64
 	PCIeRoot  *string
+	PCIBusID  *string
 	PCIeRoots []string
 	Socket    *int64
 
@@ -69,6 +71,7 @@ type TopologyDevice struct {
 	// Devices referencing the same CounterSet are overlapping partitions of the
 	// same physical resource (KEP-4815 partitionable devices).
 	ConsumesCounters []resourcev1.DeviceCounterConsumption
+	CounterCapacity  map[string]map[string]int64
 }
 
 // DeviceAttributeValue holds a typed attribute value.
@@ -124,11 +127,14 @@ func (nt *NodeTopology) DevicesForDriver(driverName string) []TopologyDevice {
 // rawSliceData holds the raw information from a ResourceSlice needed
 // for re-extraction when topology rules change.
 type rawSliceData struct {
-	SliceName  string
-	DriverName string
-	NodeName   string
-	PoolName   string
-	Devices    []resourcev1.Device
+	SliceName      string
+	DriverName     string
+	NodeName       string
+	PoolName       string
+	Generation     int64
+	SliceCount     int64
+	SharedCounters []resourcev1.CounterSet
+	Devices        []resourcev1.Device
 }
 
 // TopologyModel is the cross-driver topology model built from ResourceSlices.
@@ -168,9 +174,78 @@ func (m *TopologyModel) reextractAllLocked() {
 	m.nodes = make(map[string]*NodeTopology)
 
 	// Re-extract all devices with current rules
+	type poolKey struct{ driver, pool string }
+	groups := make(map[poolKey][]rawSliceData)
 	for _, raw := range m.rawSlices {
-		m.applySliceDataLocked(raw)
+		key := poolKey{raw.DriverName, raw.PoolName}
+		groups[key] = append(groups[key], raw)
 	}
+	for _, slices := range groups {
+		hasSharedCounters := false
+		for _, raw := range slices {
+			if len(raw.SharedCounters) > 0 {
+				hasSharedCounters = true
+				break
+			}
+		}
+		if !hasSharedCounters {
+			for _, raw := range slices {
+				m.applySliceDataLocked(raw, nil)
+			}
+			continue
+		}
+		var generation int64
+		for _, raw := range slices {
+			if raw.Generation > generation {
+				generation = raw.Generation
+			}
+		}
+		var current []rawSliceData
+		var expected int64
+		capacities := make(map[string]map[string]int64)
+		valid := true
+		for _, raw := range slices {
+			if raw.Generation != generation {
+				continue
+			}
+			if expected != 0 && expected != raw.SliceCount {
+				valid = false
+			}
+			expected = raw.SliceCount
+			current = append(current, raw)
+			for _, set := range raw.SharedCounters {
+				values := make(map[string]int64, len(set.Counters))
+				for name, counter := range set.Counters {
+					values[name] = counter.Value.Value()
+				}
+				if previous, exists := capacities[set.Name]; exists {
+					if !equalCounterCapacity(previous, values) {
+						valid = false
+					}
+				} else {
+					capacities[set.Name] = values
+				}
+			}
+		}
+		if !valid || expected <= 0 || int64(len(current)) != expected {
+			continue
+		}
+		for _, raw := range current {
+			m.applySliceDataLocked(raw, capacities)
+		}
+	}
+}
+
+func equalCounterCapacity(a, b map[string]int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // GetRules returns the current topology rules.
@@ -212,16 +287,26 @@ func (m *TopologyModel) UpdateFromResourceSlice(slice *resourcev1.ResourceSlice)
 	for i, d := range slice.Spec.Devices {
 		devicesCopy[i] = *d.DeepCopy()
 	}
+	sharedCopy := make([]resourcev1.CounterSet, len(slice.Spec.SharedCounters))
+	for i, set := range slice.Spec.SharedCounters {
+		sharedCopy[i] = resourcev1.CounterSet{Name: set.Name, Counters: make(map[string]resourcev1.Counter, len(set.Counters))}
+		for name, counter := range set.Counters {
+			sharedCopy[i].Counters[name] = counter
+		}
+	}
 	m.rawSlices[rawKey] = rawSliceData{
-		SliceName:  slice.Name,
-		DriverName: driverName,
-		NodeName:   nodeName,
-		PoolName:   poolName,
-		Devices:    devicesCopy,
+		SliceName:      slice.Name,
+		DriverName:     driverName,
+		NodeName:       nodeName,
+		PoolName:       poolName,
+		Generation:     slice.Spec.Pool.Generation,
+		SliceCount:     slice.Spec.Pool.ResourceSliceCount,
+		SharedCounters: sharedCopy,
+		Devices:        devicesCopy,
 	}
 
 	// Extract and apply
-	m.applySliceDataLocked(m.rawSlices[rawKey])
+	m.reextractAllLocked()
 
 	klog.V(4).Infof("Updated topology model: node=%s driver=%s pool=%s devices=%d",
 		nodeName, driverName, poolName, len(slice.Spec.Devices))
@@ -229,7 +314,7 @@ func (m *TopologyModel) UpdateFromResourceSlice(slice *resourcev1.ResourceSlice)
 
 // applySliceDataLocked extracts topology devices from raw slice data
 // and updates the node topology. Must be called with m.mu held.
-func (m *TopologyModel) applySliceDataLocked(raw rawSliceData) {
+func (m *TopologyModel) applySliceDataLocked(raw rawSliceData, capacities map[string]map[string]int64) {
 	var devices []TopologyDevice
 	for _, device := range raw.Devices {
 		td := m.extractTopologyDevice(raw.DriverName, device.Name, raw.NodeName, raw.PoolName, device.Attributes)
@@ -244,6 +329,12 @@ func (m *TopologyModel) applySliceDataLocked(raw rawSliceData) {
 		if len(device.ConsumesCounters) > 0 {
 			td.ConsumesCounters = make([]resourcev1.DeviceCounterConsumption, len(device.ConsumesCounters))
 			copy(td.ConsumesCounters, device.ConsumesCounters)
+			td.CounterCapacity = make(map[string]map[string]int64)
+			for _, cc := range device.ConsumesCounters {
+				if cap, ok := capacities[cc.CounterSet]; ok {
+					td.CounterCapacity[cc.CounterSet] = cap
+				}
+			}
 		}
 		devices = append(devices, td)
 	}
@@ -279,18 +370,7 @@ func (m *TopologyModel) RemoveResourceSlice(slice *resourcev1.ResourceSlice) {
 
 	// Remove raw data
 	delete(m.rawSlices, slice.Name)
-
-	nt, ok := m.nodes[nodeName]
-	if !ok {
-		return
-	}
-
-	delete(nt.DevicesByDriver, slice.Name)
-
-	// Clean up empty nodes
-	if len(nt.DevicesByDriver) == 0 {
-		delete(m.nodes, nodeName)
-	}
+	m.reextractAllLocked()
 
 	klog.V(4).Infof("Removed from topology model: node=%s slice=%s", nodeName, slice.Name)
 }
@@ -354,6 +434,20 @@ func (td TopologyDevice) deepCopy() TopologyDevice {
 	if td.PCIeRoot != nil {
 		v := *td.PCIeRoot
 		cp.PCIeRoot = &v
+	}
+	if td.PCIBusID != nil {
+		v := *td.PCIBusID
+		cp.PCIBusID = &v
+	}
+	if td.CounterCapacity != nil {
+		cp.CounterCapacity = make(map[string]map[string]int64, len(td.CounterCapacity))
+		for set, counters := range td.CounterCapacity {
+			values := make(map[string]int64, len(counters))
+			for name, value := range counters {
+				values[name] = value
+			}
+			cp.CounterCapacity[set] = values
+		}
 	}
 	if td.Socket != nil {
 		v := *td.Socket
@@ -448,6 +542,10 @@ func deviceAttributeValues(dev TopologyDevice, attribute string) []string {
 		if dev.PCIeRoot != nil {
 			return []string{*dev.PCIeRoot}
 		}
+	case AttrPCIBusID:
+		if dev.PCIBusID != nil {
+			return []string{*dev.PCIBusID}
+		}
 	case AttrSocket:
 		if dev.Socket != nil {
 			return []string{fmt.Sprintf("%d", *dev.Socket)}
@@ -466,6 +564,8 @@ func deviceHasAttribute(dev TopologyDevice, attribute string) bool {
 		return dev.NUMANode != nil || len(dev.NUMANodes) > 0
 	case AttrPCIeRoot:
 		return dev.PCIeRoot != nil || len(dev.PCIeRoots) > 0
+	case AttrPCIBusID:
+		return dev.PCIBusID != nil
 	case AttrSocket:
 		return dev.Socket != nil
 	default:
@@ -480,6 +580,8 @@ func deviceHasScalarAttribute(dev TopologyDevice, attribute string) bool {
 		return dev.NUMANode != nil
 	case AttrPCIeRoot:
 		return dev.PCIeRoot != nil
+	case AttrPCIBusID:
+		return dev.PCIBusID != nil
 	case AttrSocket:
 		return dev.Socket != nil
 	default:
@@ -515,6 +617,11 @@ func (m *TopologyModel) extractTopologyDevice(
 		case AttrPCIeRoot:
 			if attr.StringValue != nil {
 				td.PCIeRoot = attr.StringValue
+			}
+			continue
+		case AttrPCIBusID:
+			if attr.StringValue != nil {
+				td.PCIBusID = attr.StringValue
 			}
 			continue
 		case AttrSocket:

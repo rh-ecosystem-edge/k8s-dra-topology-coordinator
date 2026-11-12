@@ -29,6 +29,7 @@ type Contract struct {
 }
 
 type ContractRequest struct {
+	Name          string            `json:"name,omitempty"`
 	DeviceClass   string            `json:"deviceClass"`
 	SourceDriver  string            `json:"sourceDriver,omitempty"`
 	Count         int               `json:"count"`
@@ -94,6 +95,7 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 	requests := make([]ContractRequest, 0, len(config.SubResources))
 	for _, sr := range config.SubResources {
 		requests = append(requests, ContractRequest{
+			Name:          sr.Name,
 			DeviceClass:   sr.DeviceClass,
 			SourceDriver:  sr.SourceDriver,
 			Count:         sr.Count,
@@ -189,7 +191,7 @@ func partitionConfig(dc resourcev1.DeviceClass) (controller.PartitionConfig, err
 		if partition.Kind != "PartitionConfig" {
 			continue
 		}
-		if partition.APIVersion != "" && partition.APIVersion != controller.PartitionConfigAPIVersion {
+		if partition.APIVersion != "" && partition.APIVersion != controller.PartitionConfigAPIVersion && partition.APIVersion != controller.PartitionConfigV1Alpha2 {
 			return controller.PartitionConfig{}, fmt.Errorf("managed DeviceClass %q has unsupported PartitionConfig apiVersion %q", dc.Name, partition.APIVersion)
 		}
 		if err := partition.Validate(); err != nil {
@@ -240,6 +242,9 @@ func writeContractTable(w io.Writer, contract Contract) error {
 			{"    Capacity request:", emptyValue(capacity)},
 			{"    VM passthrough:", passthrough},
 			{"    GPU partition profile:", emptyValue(request.Profile)},
+		}
+		if request.Name != "" {
+			rows = append([][]string{{"  Request name:", request.Name}}, rows...)
 		}
 		for _, row := range rows {
 			if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
