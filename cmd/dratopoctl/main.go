@@ -1,6 +1,5 @@
-// Command dratopoctl is a read-only catalog client for the Node
-// Partition Topology Coordinator. It lists the DeviceClasses the coordinator
-// manages and the offerings built on them.
+// Command dratopoctl discovers Node Partition Topology Coordinator offerings
+// and previews ResourceClaim expansion through API-server dry-run admission.
 package main
 
 import (
@@ -39,7 +38,7 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "dratopoctl",
-		Short:         "Discover Node Partition Topology Coordinator offerings",
+		Short:         "Discover offerings and preview ResourceClaim expansion",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -90,16 +89,24 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	offerings.AddCommand(list, get, explain)
-	root.AddCommand(offerings)
+	root.AddCommand(offerings, newClaimsCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
 
 func newClient() (kubernetes.Interface, error) {
+	return clientFromConfig(kubeClientConfig())
+}
+
+func kubeClientConfig() clientcmd.ClientConfig {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	rules.ExplicitPath = kubeconfig
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		rules, &clientcmd.ConfigOverrides{CurrentContext: kubeContext}).ClientConfig()
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		rules, &clientcmd.ConfigOverrides{CurrentContext: kubeContext})
+}
+
+func clientFromConfig(config clientcmd.ClientConfig) (kubernetes.Interface, error) {
+	cfg, err := config.ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}

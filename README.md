@@ -213,9 +213,9 @@ All keys use the fixed prefix `nodepartition.dra.k8s.io/`.
 | `display-name`, `description`, `categories`, `workload-types` | annotation | From grouping intent metadata |
 | `expanded-requests` | annotation on expanded claims | Mapping from original to expanded request names, written by the webhook |
 
-## Discover offerings with dratopoctl
+## Discover offerings and preview claims with dratopoctl
 
-`dratopoctl` accepts `--kubeconfig`, `--context`, and `-o table|json` on every command. Listing needs `get` and `list` on `deviceclasses`.
+`dratopoctl` accepts `--kubeconfig` and `--context` on every command. Catalog commands support `-o table|json` and need `list` access to `deviceclasses`.
 
 ```sh
 dratopoctl offerings list            # curated offerings only
@@ -225,6 +225,20 @@ dratopoctl offerings get gpu-inference-rail0 -o json
 dratopoctl offerings explain gpu-inference
 dratopoctl offerings explain gpu-inference -o json
 ```
+
+Preview the exact ResourceClaim returned by webhook admission before saving it:
+
+```sh
+dratopoctl claims expand -f claim.yaml
+dratopoctl claims expand -f resourceclaim-template.yaml -n default
+kubectl get resourceclaimtemplate my-template -o yaml | dratopoctl claims expand -f -
+dratopoctl claims expand --offering gpu-inference
+dratopoctl claims expand --offering gpu-inference --count 3
+```
+
+`claims expand` accepts either one `resource.k8s.io/v1` ResourceClaim or ResourceClaimTemplate in a YAML or JSON file (or stdin), or one curated offering with `--offering`; other YAML documents such as a Pod are ignored. `--count` defaults to 1 and sets the number of complete offering bundles requested, not the number of sub-devices or the catalog's current `Count`. It is valid only with `--offering`. The shortcut checks that the name is a curated offering before previewing it.
+
+The command submits a ResourceClaim CREATE with server-side dry-run admission and prints the full admitted ResourceClaim as JSON, including selectors, constraints, configuration, and the `expanded-requests` annotation. Nothing is persisted. For a template, the command copies `spec.spec` and `spec.metadata` labels and annotations into a preview claim with a synthetic name. The namespace comes from the input, `-n`, the selected kubeconfig context, or `default`, in that order; conflicting input and `-n` namespaces are rejected. The kubeconfig identity needs `create` access to ResourceClaims in the resolved namespace; `--offering` also needs cluster-scoped `list` access to DeviceClasses for catalog validation, and the coordinator webhook must be reachable. A named ResourceClaim that already exists can return `AlreadyExists`; inspect the stored claim with `kubectl get resourceclaim NAME -o yaml` instead. This preview does not prove allocation availability or show Pod/VMI request-name rewrites. Its full JSON may contain opaque driver configuration, so review it before sharing.
 
 Entries have a `kind`: `offering` (aggregate class with `offering=true`), `grouping` (any other ConfigMap grouping), `auto-detected` (coordinator-derived PCIe pairing), or `partition` (fixed-hierarchy class). Per-instance classes appear as `variants` of their aggregate. Output never includes class selectors or opaque driver configuration. Names of `grouping`, `auto-detected`, and `partition` entries can change with topology, so only `offering` entries are stable request targets.
 
