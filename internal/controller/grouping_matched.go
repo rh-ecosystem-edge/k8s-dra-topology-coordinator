@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // findMatchedInstances finds complete bundles on one physical counter set.
@@ -18,17 +19,27 @@ func (b *GroupingBuilder) findMatchedInstances(nodeName string, devices []Topolo
 	for _, key := range keys {
 		groups := make(map[string][]TopologyDevice)
 		for _, dev := range byAlignment[key] {
-			value, set := deviceAttributeValueString(dev, grouping.MatchAttribute), counterGroupID(dev)
-			if value == "" || set == "" || len(dev.CounterCapacity) == 0 {
+			value := deviceAttributeValueString(dev, grouping.MatchAttribute)
+			if value == "" {
 				continue
 			}
-			groups[value+"|"+set] = append(groups[value+"|"+set], dev)
+			for _, consumed := range dev.ConsumesCounters {
+				if consumed.CounterSet == "" {
+					continue
+				}
+				if _, ok := dev.CounterCapacity[consumed.CounterSet]; !ok {
+					continue
+				}
+				groupID := dev.DriverName + "/" + dev.PoolName + "/" + consumed.CounterSet
+				groups[value+"|"+groupID] = append(groups[value+"|"+groupID], dev)
+			}
 		}
 		groupKeys := make([]string, 0, len(groups))
 		for group := range groups {
 			groupKeys = append(groupKeys, group)
 		}
 		sort.Strings(groupKeys)
+		seenBundles := make(map[string]bool)
 		for _, group := range groupKeys {
 			candidates := groups[group]
 			sort.Slice(candidates, func(i, j int) bool { return deviceKey(candidates[i]) < deviceKey(candidates[j]) })
@@ -36,6 +47,16 @@ func (b *GroupingBuilder) findMatchedInstances(nodeName string, devices []Topolo
 			if !ok {
 				continue
 			}
+			deviceKeys := make([]string, len(picked))
+			for i := range picked {
+				deviceKeys[i] = deviceKey(picked[i])
+			}
+			sort.Strings(deviceKeys)
+			bundleKey := strings.Join(deviceKeys, "\x00")
+			if seenBundles[bundleKey] {
+				continue
+			}
+			seenBundles[bundleKey] = true
 			inst := b.buildInstance(fmt.Sprintf("%s-%s-%s-%d", nodeName, grouping.Name, sanitizeForName(alignment), len(result)), nodeName, grouping, alignment, picked)
 			inst.InstanceIndex = len(result)
 			result = append(result, inst)
@@ -61,7 +82,6 @@ func (b *GroupingBuilder) selectCounterBundle(candidates []TopologyDevice, entri
 			slots = append(slots, entry)
 		}
 	}
-	capacity := candidates[0].CounterCapacity
 	var picked []TopologyDevice
 	usedDevices := make(map[string]bool)
 	usedCounters := make(map[string]int64)
@@ -78,7 +98,7 @@ func (b *GroupingBuilder) selectCounterBundle(candidates []TopologyDevice, entri
 			var delta = make(map[string]int64)
 			fits := true
 			for _, cc := range dev.ConsumesCounters {
-				limits, ok := capacity[cc.CounterSet]
+				limits, ok := dev.CounterCapacity[cc.CounterSet]
 				if !ok {
 					fits = false
 					break

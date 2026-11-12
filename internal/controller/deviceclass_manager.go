@@ -1709,6 +1709,7 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 		if inst.MatchAttribute != "" {
 			config.Alignments = append(config.Alignments, AlignmentConfig{Attribute: inst.MatchAttribute, Requests: names, Enforcement: EnforcementRequired, Scope: "group"})
 		}
+		m.appendNamedMatchConstraintAlignments(&config, inst)
 		sortPartitionConfig(&config)
 		return config
 	}
@@ -1825,6 +1826,48 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 
 	sortPartitionConfig(&config)
 	return config
+}
+
+func (m *DeviceClassManager) appendNamedMatchConstraintAlignments(config *PartitionConfig, inst GroupingInstance) {
+	for _, rule := range m.rules.GetMatchConstraintRules() {
+		if alignment := groupingAlignmentForRule(rule); alignment != "" && alignment != inst.Alignment {
+			continue
+		}
+		driversWithAttribute := make(map[string]bool)
+		for _, dev := range inst.Devices {
+			if deviceAttributeValueString(dev, qualifiedAttribute(baseDriverName(dev.DriverName), rule.Attribute)) != "" {
+				driversWithAttribute[baseDriverName(dev.DriverName)] = true
+			}
+		}
+		var requests []string
+		for _, entry := range inst.Entries {
+			rawDriver := m.driverForClass(entry.Class)
+			if rule.Driver != "" && baseDriverName(rawDriver) != rule.Driver {
+				continue
+			}
+			if !driversWithAttribute[baseDriverName(rawDriver)] {
+				continue
+			}
+			requestDriver := entry.RequestDriver
+			if requestDriver == "" {
+				requestDriver = rawDriver
+			}
+			if !requestDriverPublishes(requestDriver, rawDriver, rule.Attribute) {
+				klog.V(2).Infof("Grouping %q: skipping %s in %s alignment; request driver %q may not publish it",
+					inst.GroupingName, entry.Name, rule.Attribute, requestDriver)
+				continue
+			}
+			requests = append(requests, entry.Name)
+		}
+		if len(requests) < 2 || (inst.MatchAttribute != "" && rule.Attribute == inst.MatchAttribute) {
+			continue
+		}
+		enforcement := rule.Enforcement
+		if enforcement == "" {
+			enforcement = EnforcementRequired
+		}
+		config.Alignments = append(config.Alignments, AlignmentConfig{Attribute: rule.Attribute, Requests: requests, Enforcement: enforcement})
+	}
 }
 
 // buildGroupingDeviceClass constructs a DeviceClass for a grouping instance.

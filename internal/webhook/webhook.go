@@ -513,6 +513,13 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 		}
 		driverCounts[driver] += sr.Count
 	}
+	hasMultiDeviceRequest := false
+	for _, subRequest := range subRequests {
+		if subRequest.Exactly != nil && subRequest.Exactly.Count > 1 {
+			hasMultiDeviceRequest = true
+			break
+		}
+	}
 
 	// Build constraints from alignments.
 	// When sub-resources are split (count>1 → individual requests), constraints
@@ -575,7 +582,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 			for _, dr := range perDriver {
 				allRequests = append(allRequests, dr.names...)
 			}
-			if len(allRequests) >= 2 {
+			if len(allRequests) >= 2 || (alignment.Scope == "group" && hasMultiDeviceRequest) {
 				constraints = append(constraints, resourcev1.DeviceConstraint{
 					Requests:       allRequests,
 					MatchAttribute: &attr,

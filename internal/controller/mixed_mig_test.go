@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -81,9 +83,14 @@ func TestMixedMIGGroupingUsesOneCounterSet(t *testing.T) {
 			config := NewDeviceClassManager(nil, "", rules).buildGroupingAggregateConfig(result[0].Instances[0])
 			assert.Equal(t, PartitionConfigV1Alpha2, config.APIVersion)
 			require.Len(t, config.SubResources, 3)
-			require.Len(t, config.Alignments, 1)
-			assert.Equal(t, AttrPCIBusID, config.Alignments[0].Attribute)
-			assert.Equal(t, "group", config.Alignments[0].Scope)
+			assert.Contains(t, config.Alignments, AlignmentConfig{
+				Attribute: AttrPCIBusID, Requests: []string{"large", "medium", "small"},
+				Enforcement: EnforcementRequired, Scope: "group",
+			})
+			assert.Contains(t, config.Alignments, AlignmentConfig{
+				Attribute: AttrPCIeRoot, Requests: []string{"large", "medium", "small"},
+				Enforcement: EnforcementRequired,
+			})
 			assert.NoError(t, config.Validate())
 			client := fake.NewSimpleClientset()
 			manager := NewDeviceClassManager(client, CoordinatorDriverName, rules)
@@ -96,6 +103,35 @@ func TestMixedMIGGroupingUsesOneCounterSet(t *testing.T) {
 			assert.Len(t, published.SubResources, 3)
 		})
 	}
+}
+
+func TestMixedMIGGroupingHandlesMultipleCounterSets(t *testing.T) {
+	devices := mixedMIGDevices(4, false)
+	for i := range devices {
+		consumed := devices[i].ConsumesCounters[0]
+		localSet := fmt.Sprintf("local-%d", i)
+		sets := []resourcev1.DeviceCounterConsumption{
+			{CounterSet: localSet, Counters: map[string]resourcev1.Counter{"local": makeCounter(1)}},
+			{CounterSet: "gpu-0-counter-set", Counters: consumed.Counters},
+			{CounterSet: "gpu-0-secondary-counter-set", Counters: consumed.Counters},
+		}
+		switch i {
+		case 1:
+			sets[0], sets[1] = sets[1], sets[0]
+		case 2:
+			sets[0], sets[2] = sets[2], sets[0]
+		}
+		devices[i].ConsumesCounters = sets
+		devices[i].CounterCapacity[localSet] = map[string]int64{"local": 1}
+		devices[i].CounterCapacity["gpu-0-secondary-counter-set"] = devices[i].CounterCapacity["gpu-0-counter-set"]
+	}
+	model := NewTopologyModel()
+	model.nodes["node-1"] = &NodeTopology{NodeName: "node-1", DevicesByDriver: map[string][]TopologyDevice{migDriver: devices}}
+
+	results := NewGroupingBuilder(model, migRules(t)).BuildGroupings([]DeviceGrouping{mixedMIGGrouping()})
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Instances, 1, "the common counter sets describe one identical bundle")
+	assert.Equal(t, 3, len(results[0].Instances[0].Devices))
 }
 
 func TestMixedMIGGroupingConfigNames(t *testing.T) {
