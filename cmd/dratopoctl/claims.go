@@ -28,7 +28,7 @@ func newClaimsCmd() *cobra.Command {
 		Short: "Preview the ResourceClaim produced by webhook admission",
 		Long:  "Submit a ResourceClaim, ResourceClaimTemplate, or curated offering as a server-side dry run and print the admitted ResourceClaim. No claim is saved. Offering count is the number of complete offering bundles. For templates and offerings, the preview claim has a synthetic name; this does not preview Pod or VMI request rewrites or allocation.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			if err := validateExpandInput(cmd.Flags().Changed("file"), file, cmd.Flags().Changed("offering"), offering, cmd.Flags().Changed("count"), count); err != nil {
 				return err
 			}
@@ -47,13 +47,17 @@ func newClaimsCmd() *cobra.Command {
 			if cmd.Flags().Changed("offering") {
 				err = runExpandOffering(cmd.Context(), client, cmd.OutOrStdout(), offering, count, namespace, contextNamespace)
 			} else {
-				var input io.Reader = cmd.InOrStdin()
+				var input = cmd.InOrStdin()
 				if file != "-" {
 					f, openErr := os.Open(file)
 					if openErr != nil {
 						return fmt.Errorf("open %q: %w", file, openErr)
 					}
-					defer f.Close()
+					defer func() {
+						if closeErr := f.Close(); closeErr != nil && runErr == nil {
+							runErr = fmt.Errorf("close %q: %w", file, closeErr)
+						}
+					}()
 					input = f
 				}
 				err = runExpand(cmd.Context(), client, cmd.OutOrStdout(), input, namespace, contextNamespace)
