@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/yaml"
 
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
@@ -115,7 +116,7 @@ func TestRunList_NeverPrintsClassConfig(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	for _, format := range []string{"table", "json"} {
+	for _, format := range []string{"table", "json", "yaml"} {
 		var buf bytes.Buffer
 		require.NoError(t, runList(context.Background(), client, &buf, true, format))
 		assert.NotContains(t, buf.String(), "secret-selector")
@@ -130,6 +131,26 @@ func TestRunList_NeverPrintsClassConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
 	require.Len(t, got, 1)
 	assert.Equal(t, kindOffering, got[0].Kind)
+
+	var yamlOutput bytes.Buffer
+	require.NoError(t, runList(context.Background(), client, &yamlOutput, true, "yaml"))
+	var yamlEntries []Entry
+	require.NoError(t, yaml.Unmarshal(yamlOutput.Bytes(), &yamlEntries))
+	require.Len(t, yamlEntries, 4)
+	var yamlOffering Entry
+	for _, entry := range yamlEntries {
+		if entry.Name == "gpu-inference" {
+			yamlOffering = entry
+			break
+		}
+	}
+	assert.Equal(t, []string{"gpu-inference-rail0", "gpu-inference-rail1"}, yamlOffering.Variants)
+}
+
+func TestRunListYAMLEmptyIsEmptySequence(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, runList(context.Background(), fake.NewSimpleClientset(), &buf, false, "yaml"))
+	assert.Equal(t, "[]\n", buf.String())
 }
 
 func TestRunListTableCompactsWideColumns(t *testing.T) {
@@ -205,6 +226,15 @@ func TestRunExplainShowsSafeNormalizedContract(t *testing.T) {
 	assert.Equal(t, "dra.nvme", contract.Requests[0].DeviceClass)
 	assert.Equal(t, "required", contract.Alignments[0].Enforcement)
 	assert.NotContains(t, encoded.String(), "secret")
+
+	var yamlOutput bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), client, &yamlOutput, "storage-network", "yaml"))
+	var yamlContract Contract
+	require.NoError(t, yaml.Unmarshal(yamlOutput.Bytes(), &yamlContract))
+	assert.Equal(t, contract, yamlContract)
+	assert.NotContains(t, yamlOutput.String(), "secret")
+	assert.NotContains(t, yamlOutput.String(), "secret-selector")
+	assert.NotContains(t, yamlOutput.String(), "drv")
 }
 
 func TestBuildContractReportsMIGProfileWithoutSelectors(t *testing.T) {
@@ -455,7 +485,15 @@ func TestRunGet(t *testing.T) {
 	assert.Equal(t, "pcieRoot", got.Alignment)
 	assert.Empty(t, got.Variants)
 
+	var yamlAggregate bytes.Buffer
+	require.NoError(t, runGet(context.Background(), client, &yamlAggregate, "gpu-inference", "yaml"))
+	var aggregate Entry
+	require.NoError(t, yaml.Unmarshal(yamlAggregate.Bytes(), &aggregate))
+	assert.Equal(t, []string{"gpu-inference-rail0", "gpu-inference-rail1"}, aggregate.Variants)
+	assert.NotContains(t, yamlAggregate.String(), "secret-selector")
+	assert.NotContains(t, yamlAggregate.String(), "drv")
+
 	err := runGet(context.Background(), client, &buf, "missing", "table")
 	require.ErrorContains(t, err, `no managed DeviceClass "missing"`)
-	require.ErrorContains(t, runGet(context.Background(), client, &buf, "gpu-full", "yaml"), "invalid --output")
+	require.ErrorContains(t, runGet(context.Background(), client, &buf, "gpu-full", "xml"), "must be table, json, or yaml")
 }

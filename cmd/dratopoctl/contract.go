@@ -67,6 +67,9 @@ func runExplain(ctx context.Context, client kubernetes.Interface, w io.Writer, n
 		if format == "json" {
 			return writeJSON(w, contract)
 		}
+		if format == "yaml" {
+			return writeYAML(w, contract)
+		}
 		return writeContractTable(w, contract)
 	}
 	return fmt.Errorf("no managed DeviceClass %q found", name)

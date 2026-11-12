@@ -215,15 +215,17 @@ All keys use the fixed prefix `nodepartition.dra.k8s.io/`.
 
 ## Discover offerings and preview claims with dratopoctl
 
-`dratopoctl` accepts `--kubeconfig` and `--context` on every command. Catalog commands support `-o table|json` and need `list` access to `deviceclasses`.
+`dratopoctl` accepts `--kubeconfig` and `--context` on every command. Catalog commands support `-o table|json|yaml` and need `list` access to `deviceclasses`.
 
 ```sh
 dratopoctl offerings list            # curated offerings only
 dratopoctl offerings list --all      # plus grouping, auto-detected, and partition classes
 dratopoctl offerings get gpu-inference -o json
+dratopoctl offerings list --all -o yaml
 dratopoctl offerings get gpu-inference-rail0 -o json
 dratopoctl offerings explain gpu-inference
 dratopoctl offerings explain gpu-inference -o json
+dratopoctl offerings explain gpu-inference -o yaml
 ```
 
 Preview the exact ResourceClaim returned by webhook admission before saving it:
@@ -251,7 +253,7 @@ source ~/.bashrc
 
 `offerings get NAME` and `offerings explain NAME` dynamically complete managed catalog and topology-specific variant names from the cluster. Completion only needs the current kubeconfig identity to have `list` access to the cluster-scoped `deviceclasses` resource. It is bounded to a short timeout, so an unavailable API server returns no names instead of blocking the shell. Variants are useful when a workload needs a particular topology shape, but their names can change after reconciliation.
 
-`offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, mode, topology level, placement, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. For grouping classes, the topology level comes from the configured `alignment`; for fixed partition classes it is derived from `partitionType` (`numa` → `numaNode`, `pcieroot` → `pcieRoot`, and `full` → `node`). Aggregate classes report `scheduler-selected` placement, while topology-specific variants report their concrete NUMA, PCIe-root, or rail label. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` when another tool needs to consume the contract; JSON field names remain stable (`mode`, `alignment`, and `partitionMode`), with `placement` identifying the selected or scheduler-chosen topology value.
+`offerings explain NAME` shows the normalized request contract for a managed DeviceClass: its kind, mode, topology level, placement, source driver, requested device class, count, capacity request, VM passthrough flag, GPU partition profile, and configured alignment rules. For grouping classes, the topology level comes from the configured `alignment`; for fixed partition classes it is derived from `partitionType` (`numa` → `numaNode`, `pcieroot` → `pcieRoot`, and `full` → `node`). Aggregate classes report `scheduler-selected` placement, while topology-specific variants report their concrete NUMA, PCIe-root, or rail label. It validates the embedded `PartitionConfig` and intentionally omits raw CEL selectors and opaque driver parameters. Use `-o json` or `-o yaml` when another tool needs to consume the contract; both formats serialize the same normalized fields (`mode`, `alignment`, and `partitionMode`), with `placement` identifying the selected or scheduler-chosen topology value. YAML and JSON catalog output never include source ConfigMaps, raw selectors, or opaque driver configuration. `claims expand` continues to accept JSON output only.
 
 
 ### Co-allocatable slices (NVIDIA dynamic MIG)
