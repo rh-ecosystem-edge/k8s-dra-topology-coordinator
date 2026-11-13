@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/yaml"
 
 	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
@@ -45,7 +46,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "",
 		"Path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
 	root.PersistentFlags().StringVar(&kubeContext, "context", "", "Kubeconfig context to use")
-	root.PersistentFlags().StringVarP(&output, "output", "o", "table", "Output format: table or json")
+	root.PersistentFlags().StringVarP(&output, "output", "o", "table", "Output format: table, json, or yaml")
 
 	offerings := &cobra.Command{Use: "offerings", Short: "List and inspect offerings"}
 	list := &cobra.Command{
@@ -144,9 +145,12 @@ func runList(ctx context.Context, client kubernetes.Interface, w io.Writer, all 
 		return err
 	}
 	entries = filterEntries(entries, all)
-	if format == "json" {
+	if format == "json" || format == "yaml" {
 		if entries == nil {
 			entries = []Entry{}
+		}
+		if format == "yaml" {
+			return writeYAML(w, entries)
 		}
 		return writeJSON(w, entries)
 	}
@@ -175,6 +179,9 @@ func runGet(ctx context.Context, client kubernetes.Interface, w io.Writer, name,
 	if ok {
 		if format == "json" {
 			return writeJSON(w, entry)
+		}
+		if format == "yaml" {
+			return writeYAML(w, entry)
 		}
 		return writeTable(w, [][]string{
 			{"Name:", entry.Name},
@@ -247,8 +254,8 @@ func compact(s string, max int) string {
 }
 
 func checkFormat(format string) error {
-	if format != "table" && format != "json" {
-		return fmt.Errorf("invalid --output %q: must be table or json", format)
+	if format != "table" && format != "json" && format != "yaml" {
+		return fmt.Errorf("invalid --output %q: must be table, json, or yaml", format)
 	}
 	return nil
 }
@@ -257,6 +264,15 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+func writeYAML(w io.Writer, v any) error {
+	data, err := yaml.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
 }
 
 func dash(s string) string {

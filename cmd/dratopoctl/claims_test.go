@@ -274,3 +274,14 @@ func TestClaimsExpandRegistersOfferingFlags(t *testing.T) {
 	assert.Contains(t, help.String(), "--offering")
 	assert.Contains(t, help.String(), "--count")
 }
+
+func TestClaimsExpandRemainsJSONOnly(t *testing.T) {
+	command := newRootCmd()
+	command.SetArgs([]string{"claims", "expand", "-f", "-", "-o", "yaml"})
+	command.SetIn(strings.NewReader(""))
+	var output bytes.Buffer
+	command.SetOut(&output)
+	err := command.Execute()
+	require.ErrorContains(t, err, "claims expand supports json only")
+	assert.Empty(t, output.String())
+}
