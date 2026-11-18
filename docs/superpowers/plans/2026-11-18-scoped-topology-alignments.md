@@ -16,7 +16,7 @@ Goal: publish one stable offering whose named GPU/NIC entries share a PCIe root 
 3. [x] Publish only aggregate scoped offerings, alignment=mixed, with exact explicit required constraints, no implicit topology constraints or locality selectors. Include new mode in collision/cleanup/active-name logic. Permit legacy/rail conversion; retain old variants on transient replacement publication failure and remove them after successful replacement. A valid scoped configuration with no topology witness removes obsolete aggregate/variant classes rather than preserving a weaker contract. Preserve stable offering name.
 4. [x] Admit/explain v3. Expand selected named subsets correctly for counts, passthrough splits and singleton scopes; separate each outer offering copy. Never drop required constraints for nil/stale topology caches or driver overrides. Derive v3 remapping membership from emitted constraints, deduplicating same-attribute membership. Bound generated plus caller constraints as well as requests. CLI shows mixed, scheduler-selected, named memberships and scope.
 5. [x] Add admin documentation and full example ConfigMap, common published-attribute requirements, preview instructions and rollout/rollback instructions. Upgrade ALL controller/webhook replicas before applying; remove/convert new ConfigMaps and reconcile before downgrading. Templates referencing removed variants must migrate to stable aggregate names.
-6. [ ] Perform independent code review, fix material findings with regression tests, run final checks, commit, push feature branch to personal fork and open upstream PR.
+6. [x] Perform independent code review, fix material findings with regression tests, run final checks, commit, push feature branch to personal fork and open upstream PR.
 
 ## Required tests
 
@@ -35,3 +35,7 @@ Architect: approve with revisions. Incorporated unfiltered candidates, fully qua
 
 - Ruling: replacement-success cleanup protection applies to transient publication failures, not valid unsatisfiable desired configurations; the latter must remove the old weaker contract. Regression covers zero-witness conversion.
 - Counted entries search combinations in increasing candidate order and prune branches without enough remaining candidates; this avoids factorial equivalent permutations while preserving cross-entry backtracking. Bounded 16-GPU valid/invalid tests reproduce the prior timeout and pass after the fix.
+
+## Completion
+
+Implemented in c284319; independent review search fix in 5be1b5d. Final `make test`, `make build`, and `git diff --check` passed. Pushed branch `feat/scoped-topology-alignments`; upstream PR: https://github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/pull/50. Live driver/scheduler allocation was not exercised.
