@@ -738,6 +738,9 @@ func detectGroupingDeviceClassNameCollisions(results []GroupingResult) map[strin
 			{name: sanitizeForName(groupingName), owner: groupingName + "\x00aggregate"},
 			{name: groupingDeviceClassName(instance), owner: instanceOwner},
 		}
+		if len(instance.Alignments) > 0 {
+			classNames = classNames[:1]
+		}
 		for _, className := range classNames {
 			if ownersByName[className.name] == nil {
 				ownersByName[className.name] = make(map[string]struct{})

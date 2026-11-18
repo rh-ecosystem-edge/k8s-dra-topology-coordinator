@@ -63,6 +63,7 @@ const (
 	// the claim instead of silently expanding it without that field.
 	PartitionConfigAPIVersion = CoordinatorDriverName + "/v1alpha1"
 	PartitionConfigV1Alpha2   = CoordinatorDriverName + "/v1alpha2"
+	PartitionConfigV1Alpha3   = CoordinatorDriverName + "/v1alpha3"
 )
 
 // CouplingLevel indicates the topology tightness of a partition's constraints.
@@ -161,7 +162,10 @@ func (c *PartitionConfig) Validate() error {
 			return fmt.Errorf("subResources[%d] has duplicated request identity %q", i, identity)
 		}
 		seenNames[identity] = struct{}{}
-		if c.APIVersion != PartitionConfigV1Alpha2 && sr.Name != "" {
+		if c.APIVersion == PartitionConfigV1Alpha3 && sr.Name == "" {
+			return fmt.Errorf("subResources[%d] name is required in v1alpha3", i)
+		}
+		if c.APIVersion != PartitionConfigV1Alpha2 && c.APIVersion != PartitionConfigV1Alpha3 && sr.Name != "" {
 			return fmt.Errorf("subResources[%d] name requires v1alpha2", i)
 		}
 		// Classes published before alignments used DeviceClass names
@@ -183,6 +187,16 @@ func (c *PartitionConfig) Validate() error {
 		if c.Mode != OfferingModePassthrough || !sr.Passthrough {
 			return fmt.Errorf("subResources[%d] opaque config requires passthrough mode and passthrough=true", i)
 		}
+	}
+	if c.APIVersion == PartitionConfigV1Alpha3 {
+		as := make([]GroupingAlignment, len(c.Alignments))
+		for i, a := range c.Alignments {
+			if a.Scope != "group" || a.Enforcement != EnforcementRequired {
+				return fmt.Errorf("alignments[%d] requires group scope and required enforcement", i)
+			}
+			as[i] = GroupingAlignment{Attribute: a.Attribute, Requests: a.Requests}
+		}
+		return validateGroupingAlignments(as, seenNames)
 	}
 	for i, alignment := range c.Alignments {
 		if alignment.Scope != "" && (c.APIVersion != PartitionConfigV1Alpha2 || alignment.Scope != "group") {
@@ -1398,7 +1412,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// legacy classes and explicitly crosses the migration boundary.
 	nonRailGroupings := make(map[string]struct{})
 	for _, entry := range seen {
-		if !entry.representative.Rail {
+		if !entry.representative.Rail && len(entry.representative.Alignments) == 0 {
 			nonRailGroupings[entry.representative.GroupingName] = struct{}{}
 		}
 	}
@@ -1424,6 +1438,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// accumulated rather than returned immediately so that one unpublishable
 	// grouping does not block every other grouping from reconciling.
 	for key, entry := range seen {
+		if len(entry.representative.Alignments) > 0 {
+			continue
+		}
 		dc := m.buildGroupingDeviceClass(key, entry.representative, entry.config, entry.count)
 		dc.Name = groupingDeviceClassName(entry.representative)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
@@ -1453,6 +1470,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		deviceProfiles   map[string]string
 		entries          []GroupingDevice
 		matchAttribute   string
+		alignments       []GroupingAlignment
 		contractKey      string
 		intent           IntentMetadata // identical across instances, per the note above
 		autoDetected     bool           // identical across instances, like intent
@@ -1473,6 +1491,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 				deviceProfiles:   entry.representative.DeviceProfiles,
 				entries:          append([]GroupingDevice(nil), entry.representative.Entries...),
 				matchAttribute:   entry.representative.MatchAttribute,
+				alignments:       cloneGroupingAlignments(entry.representative.Alignments),
 				contractKey:      groupingRequestContractKey(entry.representative),
 				intent:           entry.representative.Intent,
 				autoDetected:     entry.representative.AutoDetected,
@@ -1502,6 +1521,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			DeviceProfiles: state.deviceProfiles,
 			Entries:        state.entries,
 			MatchAttribute: state.matchAttribute,
+			Alignments:     cloneGroupingAlignments(state.alignments),
 			Intent:         state.intent,
 			AutoDetected:   state.autoDetected,
 			DeviceCounts:   intersectedCounts,
@@ -1515,6 +1535,7 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 			count:          state.count,
 		}
 	}
+	failedScoped := make(map[string]bool)
 	for _, entry := range aggregates {
 		aggKey := truncateLabel(entry.representative.GroupingName) + "-" + sanitizeForName(entry.representative.Alignment)
 		dc := m.buildGroupingDeviceClass(aggKey, entry.representative, entry.config, entry.count)
@@ -1526,6 +1547,9 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 		applyIntentMetadata(dc, entry.representative.Intent)
 		if err := m.publishDeviceClass(ctx, dc); err != nil {
 			publishErrs = append(publishErrs, fmt.Errorf("failed to publish aggregate DeviceClass %s: %w", dc.Name, err))
+			if len(entry.representative.Alignments) > 0 {
+				failedScoped[entry.representative.GroupingName] = true
+			}
 		}
 	}
 
@@ -1534,12 +1558,26 @@ func (m *DeviceClassManager) SyncGroupingDeviceClasses(ctx context.Context, resu
 	// DeviceClass that a prior successful reconcile already created.
 	activeNames := make(map[string]bool, len(seen)+len(aggregates))
 	for _, entry := range seen {
+		if len(entry.representative.Alignments) > 0 {
+			continue
+		}
 		name := groupingDeviceClassName(entry.representative)
 		activeNames[name] = true
 	}
 	for _, entry := range aggregates {
 		name := sanitizeForName(entry.representative.GroupingName)
 		activeNames[name] = true
+	}
+	if len(failedScoped) > 0 {
+		classes, err := m.client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{LabelSelector: LabelManaged + "=true," + LabelGrouping})
+		if err != nil {
+			return stdliberrors.Join(append(publishErrs, err)...)
+		}
+		for _, dc := range classes.Items {
+			if failedScoped[dc.Labels[LabelGrouping]] {
+				activeNames[dc.Name] = true
+			}
+		}
 	}
 	if err := m.cleanupStaleGroupingDeviceClasses(ctx, activeNames); err != nil {
 		klog.Errorf("Failed to cleanup stale grouping DeviceClasses: %v", err)
@@ -1597,7 +1635,8 @@ func groupingRequestContractKey(inst GroupingInstance) string {
 		DeviceProfiles map[string]string          `json:"deviceProfiles,omitempty"`
 		Entries        []GroupingDevice           `json:"entries,omitempty"`
 		MatchAttribute string                     `json:"matchAttribute,omitempty"`
-	}{Mode: mode, Requests: inst.Requests, DeviceProfiles: inst.DeviceProfiles, Entries: inst.Entries, MatchAttribute: inst.MatchAttribute}
+		Alignments     []GroupingAlignment        `json:"alignments,omitempty"`
+	}{Mode: mode, Requests: inst.Requests, DeviceProfiles: inst.DeviceProfiles, Entries: inst.Entries, MatchAttribute: inst.MatchAttribute, Alignments: canonicalGroupingAlignments(inst.Alignments)}
 	data, _ := json.Marshal(contract)
 	return string(data)
 }
@@ -1678,6 +1717,9 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 	}
 	if named {
 		config.APIVersion = PartitionConfigV1Alpha2
+		if len(inst.Alignments) > 0 {
+			config.APIVersion = PartitionConfigV1Alpha3
+		}
 		var names []string
 		for _, entry := range inst.Entries {
 			requestClass := entry.RequestClass
@@ -1692,7 +1734,7 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 			if entry.Profile != "" {
 				sr.Selectors = append(sr.Selectors, fmt.Sprintf(`device.attributes[%q].profile == %q`, m.driverForClass(entry.Class), entry.Profile))
 			}
-			if includeNUMA && len(inst.NUMANodes) > 0 {
+			if includeNUMA && len(inst.Alignments) == 0 && len(inst.NUMANodes) > 0 {
 				attr, ok := m.rules.GetNUMAAttributeForDriver(driver)
 				if !ok {
 					attr = AttrNUMANode
@@ -1709,7 +1751,13 @@ func (m *DeviceClassManager) buildGroupingConfigInternal(inst GroupingInstance, 
 		if inst.MatchAttribute != "" {
 			config.Alignments = append(config.Alignments, AlignmentConfig{Attribute: inst.MatchAttribute, Requests: names, Enforcement: EnforcementRequired, Scope: "group"})
 		}
-		m.appendNamedMatchConstraintAlignments(&config, inst)
+		if len(inst.Alignments) > 0 {
+			for _, a := range inst.Alignments {
+				config.Alignments = append(config.Alignments, AlignmentConfig{Attribute: a.Attribute, Requests: append([]string(nil), a.Requests...), Scope: "group", Enforcement: EnforcementRequired})
+			}
+		} else {
+			m.appendNamedMatchConstraintAlignments(&config, inst)
+		}
 		sortPartitionConfig(&config)
 		return config
 	}

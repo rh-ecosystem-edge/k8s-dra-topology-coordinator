@@ -245,7 +245,28 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 			expandedNames = append(expandedNames, sr.Name)
 		}
 		expansionMap[req.Name] = expandedNames
-		alignedMap[req.Name] = alignedRequests(subRequests, partitionConfig)
+		if partitionConfig.APIVersion == controller.PartitionConfigV1Alpha3 {
+			members := make(map[string][]string)
+			seen := make(map[string]map[string]bool)
+			for _, c := range subConstraints {
+				if c.MatchAttribute == nil {
+					continue
+				}
+				attr := string(*c.MatchAttribute)
+				if seen[attr] == nil {
+					seen[attr] = make(map[string]bool)
+				}
+				for _, name := range c.Requests {
+					if !seen[attr][name] {
+						members[attr] = append(members[attr], name)
+						seen[attr][name] = true
+					}
+				}
+			}
+			alignedMap[req.Name] = members
+		} else {
+			alignedMap[req.Name] = alignedRequests(subRequests, partitionConfig)
+		}
 	}
 
 	if !anyExpanded {
@@ -268,6 +289,9 @@ func (ce *ClaimExpander) expandClaim(ctx context.Context, claim *resourcev1.Reso
 
 	// Add or replace constraints
 	allConstraints := append(remappedConstraints, constraints...)
+	if len(allConstraints) > resourcev1.DeviceConstraintsMaxSize {
+		return nil, &managedExpansionError{err: fmt.Errorf("claim expands to more than %d constraints", resourcev1.DeviceConstraintsMaxSize)}
+	}
 	if len(allConstraints) > 0 && (constraintsChanged || len(constraints) > 0) {
 		if len(claim.Spec.Devices.Constraints) == 0 {
 			patches = append(patches, jsonPatch{
@@ -582,7 +606,7 @@ func (ce *ClaimExpander) expandSinglePartition(prefix string, req resourcev1.Dev
 			for _, dr := range perDriver {
 				allRequests = append(allRequests, dr.names...)
 			}
-			if len(allRequests) >= 2 || (alignment.Scope == "group" && hasMultiDeviceRequest) {
+			if len(allRequests) >= 2 || (alignment.Scope == "group" && hasMultiDeviceRequest) || (config.APIVersion == controller.PartitionConfigV1Alpha3 && len(allRequests) > 0) {
 				constraints = append(constraints, resourcev1.DeviceConstraint{
 					Requests:       allRequests,
 					MatchAttribute: &attr,
@@ -775,7 +799,7 @@ func (ce *ClaimExpander) lookupPartitionConfig(ctx context.Context, deviceClassN
 			continue
 		}
 
-		if managed && partConfig.APIVersion != "" && partConfig.APIVersion != controller.PartitionConfigAPIVersion && partConfig.APIVersion != controller.PartitionConfigV1Alpha2 {
+		if managed && partConfig.APIVersion != "" && partConfig.APIVersion != controller.PartitionConfigAPIVersion && partConfig.APIVersion != controller.PartitionConfigV1Alpha2 && partConfig.APIVersion != controller.PartitionConfigV1Alpha3 {
 			return nil, true, &managedExpansionError{err: fmt.Errorf("managed DeviceClass %q has unsupported PartitionConfig apiVersion %q", deviceClassName, partConfig.APIVersion)}
 		}
 

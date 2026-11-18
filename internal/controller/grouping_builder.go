@@ -30,6 +30,7 @@ type GroupingInstance struct {
 	// (e.g., "pcieRoot", "numaNode").
 	Alignment      string
 	MatchAttribute string
+	Alignments     []GroupingAlignment
 	Entries        []GroupingDevice
 
 	// NUMANodes lists the NUMA nodes spanned by this instance.
@@ -165,6 +166,9 @@ func (b *GroupingBuilder) evaluateGrouping(
 	allDevices []TopologyDevice,
 	grouping DeviceGrouping,
 ) []GroupingInstance {
+	if len(grouping.Alignments) > 0 {
+		return b.findScopedInstances(nodeName, allDevices, grouping)
+	}
 	// Check if the node has all required device classes at all
 	if !b.nodeHasRequiredClasses(allDevices, grouping) {
 		return nil
@@ -487,6 +491,7 @@ func (b *GroupingBuilder) buildInstance(
 		AutoDetected:       grouping.AutoDetected,
 		Alignment:          alignment,
 		MatchAttribute:     grouping.MatchAttribute,
+		Alignments:         cloneGroupingAlignments(grouping.Alignments),
 		Entries:            append([]GroupingDevice(nil), grouping.Devices...),
 		DeviceCounts:       make(map[string]int),
 		DeviceCapacity:     make(map[string]map[string]string),

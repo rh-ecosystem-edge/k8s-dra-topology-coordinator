@@ -188,6 +188,8 @@ data:
       count: 1
 ```
 
+For a GPU/NIC pair on one PCIe root with CPU and memory on the GPU’s NUMA node, use [multiple scoped alignments](docs/configuration.md#multiple-scoped-alignments). The [complete example](examples/gpu-nic-numa-local.yaml) publishes one scheduler-selected offering.
+
 Ready-to-apply groupings are in [`examples/`](examples/); a larger real-world set (capacity, rail, passthrough) is in [`demos/topology-coordinator-admin-debug/configmaps.yaml`](demos/topology-coordinator-admin-debug/configmaps.yaml). See also the [demos](demos/README.md).
 
 ## DeviceClass labels and annotations

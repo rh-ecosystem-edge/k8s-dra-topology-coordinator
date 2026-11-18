@@ -100,6 +100,7 @@ type DeviceGrouping struct {
 	// Alignment is the preferred topology attribute for co-location
 	// (e.g., "pcieRoot", "numaNode", "socket").
 	Alignment      string
+	Alignments     []GroupingAlignment
 	MatchAttribute string
 	// Fallback is an optional looser alignment attribute to use when
 	// the preferred alignment is unsatisfiable for some device instances.
@@ -206,6 +207,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 		result = append(result, DeviceGrouping{
 			Name:            g.Name,
 			Alignment:       g.Alignment,
+			Alignments:      cloneGroupingAlignments(g.Alignments),
 			MatchAttribute:  g.MatchAttribute,
 			Fallback:        g.Fallback,
 			Mode:            g.Mode,
@@ -221,7 +223,7 @@ func (s *GroupingStore) GetGroupings() []DeviceGrouping {
 
 // knownGroupingKeys are the data keys parseDeviceGrouping reads.
 var knownGroupingKeys = map[string]struct{}{
-	"alignment": {}, "categories": {}, "description": {}, "devices": {}, "displayName": {},
+	"alignment": {}, "alignments": {}, "categories": {}, "description": {}, "devices": {}, "displayName": {},
 	"fallback": {}, "intentLevel": {}, "matchAttribute": {}, "mode": {}, "name": {}, "offering": {},
 	"rail": {}, "visibility": {}, "workloadTypes": {},
 }
@@ -307,12 +309,18 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 	g.Intent = intent
 
+	_, scoped := cm.Data["alignments"]
 	alignment := cm.Data["alignment"]
-	if alignment == "" {
+	if !scoped && alignment == "" {
 		return g, fmt.Errorf("missing required field 'alignment'")
 	}
-	switch alignment {
-	case "pcieRoot", "numaNode", "socket":
+	switch {
+	case scoped:
+		if alignment != "" || cm.Data["fallback"] != "" || cm.Data["matchAttribute"] != "" || g.Rail {
+			return g, fmt.Errorf("alignments cannot be combined with alignment, fallback, matchAttribute or rail")
+		}
+		g.Alignment = "mixed"
+	case alignment == "pcieRoot" || alignment == "numaNode" || alignment == "socket":
 		g.Alignment = alignment
 	default:
 		return g, fmt.Errorf("invalid alignment %q: must be pcieRoot, numaNode, or socket", alignment)
@@ -354,12 +362,12 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 		if d.Class == "" {
 			return g, fmt.Errorf("device[%d] missing required field 'class'", i)
 		}
-		if g.MatchAttribute != "" && d.Name == "" {
+		if (g.MatchAttribute != "" || scoped) && d.Name == "" {
 			return g, fmt.Errorf("device[%d] name is required with matchAttribute", i)
 		}
 		if d.Name != "" {
-			if g.MatchAttribute == "" {
-				return g, fmt.Errorf("device[%d] name requires matchAttribute", i)
+			if g.MatchAttribute == "" && !scoped {
+				return g, fmt.Errorf("device[%d] name requires matchAttribute or alignments", i)
 			}
 			if len(validation.IsDNS1123Label(d.Name)) > 0 {
 				return g, fmt.Errorf("device[%d] has invalid name %q", i, d.Name)
@@ -432,6 +440,15 @@ func parseDeviceGrouping(cm *corev1.ConfigMap) (DeviceGrouping, error) {
 	}
 
 	g.Devices = devices
+	if scoped {
+		if err := yaml.UnmarshalStrict([]byte(cm.Data["alignments"]), &g.Alignments); err != nil {
+			return g, fmt.Errorf("invalid alignments: %w", err)
+		}
+		if err := validateGroupingAlignments(g.Alignments, seenNames); err != nil {
+			return g, err
+		}
+		g.Alignments = canonicalGroupingAlignments(g.Alignments)
+	}
 	return g, nil
 }
 
