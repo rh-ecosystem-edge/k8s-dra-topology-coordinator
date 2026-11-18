@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 	"github.com/stretchr/testify/require"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/rh-ecosystem-edge/k8s-dra-topology-coordinator/internal/controller"
 )
 
 func scopedConfig() controller.PartitionConfig {
