@@ -497,3 +497,13 @@ func TestRunGet(t *testing.T) {
 	require.ErrorContains(t, err, `no managed DeviceClass "missing"`)
 	require.ErrorContains(t, runGet(context.Background(), client, &buf, "gpu-full", "xml"), "must be table, json, or yaml")
 }
+
+func TestExplainScopedOfferingV3(t *testing.T) {
+	dc := class("local", map[string]string{controller.LabelManaged: "true", controller.LabelGrouping: "local", controller.LabelAggregate: "true", controller.LabelOffering: "true", controller.LabelAlignment: "mixed"}, nil)
+	dc.Spec.Config[0].Opaque.Parameters = runtime.RawExtension{Raw: []byte(`{"apiVersion":"nodepartition.dra.k8s.io/v1alpha3","kind":"PartitionConfig","subResources":[{"name":"gpu","deviceClass":"gpu.example","count":1},{"name":"nic","deviceClass":"nic.example","count":1}],"alignments":[{"attribute":"resource.kubernetes.io/pcieRoot","scope":"group","enforcement":"required","requests":["gpu","nic"]}]}`)}
+	var out bytes.Buffer
+	require.NoError(t, runExplain(context.Background(), fake.NewSimpleClientset(&dc), &out, "local", "json"))
+	require.Contains(t, out.String(), `"scope": "group"`)
+	require.Contains(t, out.String(), `"alignment": "mixed"`)
+	require.Contains(t, out.String(), `"placement": "scheduler-selected"`)
+}

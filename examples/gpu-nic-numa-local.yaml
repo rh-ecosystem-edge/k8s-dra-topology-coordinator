@@ -1,0 +1,34 @@
+# Apply in the coordinator config namespace; replace classes/capacities for your drivers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-local-bundle
+  labels:
+    nodepartition.dra.k8s.io/device-grouping: "true"
+data:
+  name: gpu-local-bundle
+  offering: "true"
+  displayName: GPU with local networking, CPU and memory
+  description: GPU and NIC share a PCIe root; CPU and memory share the GPU's NUMA node.
+  devices: |
+    - name: gpu
+      class: gpu.amd.com
+      count: 1
+    - name: nic
+      class: rdma.mellanox.com
+      count: 1
+    - name: cpu
+      class: dra.cpu
+      count: 1
+      capacity:
+        dra.cpu/cpu: "4"
+    - name: memory
+      class: dra.memory
+      count: 1
+      capacity:
+        size: 16Gi
+  alignments: |
+    - attribute: resource.kubernetes.io/pcieRoot
+      requests: [gpu, nic]
+    - attribute: resource.kubernetes.io/numaNode
+      requests: [gpu, cpu, memory]

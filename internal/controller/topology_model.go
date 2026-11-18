@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	klog "k8s.io/klog/v2"
 )
 
@@ -72,6 +73,9 @@ type TopologyDevice struct {
 	// same physical resource (KEP-4815 partitionable devices).
 	ConsumesCounters []resourcev1.DeviceCounterConsumption
 	CounterCapacity  map[string]map[string]int64
+	// PublishedTopology retains native values independently of mapsTo normalization.
+	PublishedTopology map[string]DeviceAttributeValue
+	PublishedCounters map[string]map[string]resource.Quantity
 }
 
 // DeviceAttributeValue holds a typed attribute value.
@@ -190,7 +194,7 @@ func (m *TopologyModel) reextractAllLocked() {
 		}
 		if !hasSharedCounters {
 			for _, raw := range slices {
-				m.applySliceDataLocked(raw, nil)
+				m.applySliceDataLocked(raw, nil, nil)
 			}
 			continue
 		}
@@ -203,6 +207,7 @@ func (m *TopologyModel) reextractAllLocked() {
 		var current []rawSliceData
 		var expected int64
 		capacities := make(map[string]map[string]int64)
+		exactCapacities := make(map[string]map[string]resource.Quantity)
 		valid := true
 		for _, raw := range slices {
 			if raw.Generation != generation {
@@ -215,15 +220,18 @@ func (m *TopologyModel) reextractAllLocked() {
 			current = append(current, raw)
 			for _, set := range raw.SharedCounters {
 				values := make(map[string]int64, len(set.Counters))
+				exactValues := make(map[string]resource.Quantity, len(set.Counters))
 				for name, counter := range set.Counters {
 					values[name] = counter.Value.Value()
+					exactValues[name] = counter.Value.DeepCopy()
 				}
 				if previous, exists := capacities[set.Name]; exists {
-					if !equalCounterCapacity(previous, values) {
+					if !equalCounterCapacity(previous, values) || !equalPublishedCounters(exactCapacities[set.Name], exactValues) {
 						valid = false
 					}
 				} else {
 					capacities[set.Name] = values
+					exactCapacities[set.Name] = exactValues
 				}
 			}
 		}
@@ -231,7 +239,7 @@ func (m *TopologyModel) reextractAllLocked() {
 			continue
 		}
 		for _, raw := range current {
-			m.applySliceDataLocked(raw, capacities)
+			m.applySliceDataLocked(raw, capacities, exactCapacities)
 		}
 	}
 }
@@ -314,7 +322,7 @@ func (m *TopologyModel) UpdateFromResourceSlice(slice *resourcev1.ResourceSlice)
 
 // applySliceDataLocked extracts topology devices from raw slice data
 // and updates the node topology. Must be called with m.mu held.
-func (m *TopologyModel) applySliceDataLocked(raw rawSliceData, capacities map[string]map[string]int64) {
+func (m *TopologyModel) applySliceDataLocked(raw rawSliceData, capacities map[string]map[string]int64, exactCapacities map[string]map[string]resource.Quantity) {
 	var devices []TopologyDevice
 	for _, device := range raw.Devices {
 		td := m.extractTopologyDevice(raw.DriverName, device.Name, raw.NodeName, raw.PoolName, device.Attributes)
@@ -330,7 +338,11 @@ func (m *TopologyModel) applySliceDataLocked(raw rawSliceData, capacities map[st
 			td.ConsumesCounters = make([]resourcev1.DeviceCounterConsumption, len(device.ConsumesCounters))
 			copy(td.ConsumesCounters, device.ConsumesCounters)
 			td.CounterCapacity = make(map[string]map[string]int64)
+			td.PublishedCounters = make(map[string]map[string]resource.Quantity)
 			for _, cc := range device.ConsumesCounters {
+				if exact, ok := exactCapacities[cc.CounterSet]; ok {
+					td.PublishedCounters[cc.CounterSet] = exact
+				}
 				if cap, ok := capacities[cc.CounterSet]; ok {
 					td.CounterCapacity[cc.CounterSet] = cap
 				}
@@ -427,6 +439,29 @@ func (nt *NodeTopology) deepCopy() *NodeTopology {
 // deepCopy returns a deep copy of the TopologyDevice.
 func (td TopologyDevice) deepCopy() TopologyDevice {
 	cp := td
+	cp.PublishedTopology = make(map[string]DeviceAttributeValue, len(td.PublishedTopology))
+	for key, value := range td.PublishedTopology {
+		if value.IntValue != nil {
+			v := *value.IntValue
+			value.IntValue = &v
+		}
+		if value.StringValue != nil {
+			v := *value.StringValue
+			value.StringValue = &v
+		}
+		if value.BoolValue != nil {
+			v := *value.BoolValue
+			value.BoolValue = &v
+		}
+		cp.PublishedTopology[key] = value
+	}
+	cp.PublishedCounters = make(map[string]map[string]resource.Quantity, len(td.PublishedCounters))
+	for set, counters := range td.PublishedCounters {
+		cp.PublishedCounters[set] = make(map[string]resource.Quantity, len(counters))
+		for name, value := range counters {
+			cp.PublishedCounters[set][name] = value.DeepCopy()
+		}
+	}
 	if td.NUMANode != nil {
 		v := *td.NUMANode
 		cp.NUMANode = &v
@@ -601,11 +636,15 @@ func (m *TopologyModel) extractTopologyDevice(
 		NodeName:           nodeName,
 		PoolName:           poolName,
 		ExtendedAttributes: make(map[string]DeviceAttributeValue),
+		PublishedTopology:  make(map[string]DeviceAttributeValue),
 	}
 
 	for qn, attr := range attrs {
 		name := string(qn)
 		qualifiedName := qualifiedAttribute(driverName, name)
+		if name == AttrNUMANode || name == AttrPCIeRoot {
+			td.PublishedTopology[name] = deviceAttributeFromDRA(attr)
+		}
 
 		// Check standard attribute names first
 		switch name {
@@ -694,4 +733,17 @@ func deviceAttributeFromDRA(attr resourcev1.DeviceAttribute) DeviceAttributeValu
 		v.BoolValue = attr.BoolValue
 	}
 	return v
+}
+
+func equalPublishedCounters(a, b map[string]resource.Quantity) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, v := range a {
+		other, ok := b[name]
+		if !ok || v.Cmp(other) != 0 {
+			return false
+		}
+	}
+	return true
 }

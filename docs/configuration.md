@@ -85,7 +85,8 @@ Device groupings describe a named combination of DRA device classes that should 
 | Key | Required | Values / validation |
 | --- | --- | --- |
 | `name` | yes | Sanitizes to a DNS-1123 label of at most 56 characters |
-| `alignment` | yes | `pcieRoot`, `numaNode`, or `socket` |
+| `alignment` | unless `alignments` is set | `pcieRoot`, `numaNode`, or `socket` |
+| `alignments` | no | YAML list of required `{attribute, requests}` constraints over named device entries; replaces legacy alignment fields |
 | `matchAttribute` | no | Fully qualified scalar DRA attribute shared by every device in one expanded grouping; required for repeated classes |
 | `fallback` | no | Same values as `alignment`; opt-in looser level |
 | `devices` | yes | YAML list, non-empty (see below) |
@@ -102,7 +103,7 @@ Device groupings describe a named combination of DRA device classes that should 
 | Key | Required | Purpose |
 | --- | --- | --- |
 | `class` | yes | Topology class used to find devices; repeated entries need distinct names and `matchAttribute` |
-| `name` | no | DNS-label request identity; required when `matchAttribute` is set and otherwise omitted |
+| `name` | no | DNS-label request identity; required when `matchAttribute` or `alignments` is set and otherwise omitted |
 | `count` | yes | Positive integer |
 | `capacity` | no | Map of consumable DRA capacity requests |
 | `requestClass` | no | Driver-owned DeviceClass used in the expanded claim; defaults to `class` |
@@ -111,6 +112,38 @@ Device groupings describe a named combination of DRA device classes that should 
 | `passthrough` | no | Marks a physical device exposed to a VM; needs `mode: passthrough` |
 | `selectors` | no | CEL selectors copied to the sub-request |
 | `opaque` | no | `driver` plus a JSON-object `parameters`; copied unchanged; needs `mode: passthrough` and `passthrough: true` |
+
+### Multiple scoped alignments
+
+Use `alignments` when different parts of one offering need different topology relationships. For example:
+
+```yaml
+data:
+  name: gpu-local-bundle
+  offering: "true"
+  # devices contains named gpu, nic, cpu, and memory entries.
+  alignments: |
+    - attribute: resource.kubernetes.io/pcieRoot
+      requests: [gpu, nic]
+    - attribute: resource.kubernetes.io/numaNode
+      requests: [gpu, cpu, memory]
+```
+
+The [complete GPU/NIC/CPU/memory example](../examples/gpu-nic-numa-local.yaml) includes device classes and consumable capacities. Replace those values for your installed drivers. The NIC need not publish NUMA topology, and CPU and memory need not publish PCIe-root topology.
+
+Each constraint requires the same published attribute type and value on every allocated device of its referenced entries. Supported attributes are `resource.kubernetes.io/pcieRoot` (string) and `resource.kubernetes.io/numaNode` (integer). A singleton constraint still requires that device to publish the attribute. Topology-rule `mapsTo` mappings help legacy discovery but cannot substitute for these scheduler-visible attributes. Driver selectors, alternate request classes, and available capacity still determine allocation availability.
+
+Every device entry needs a unique DNS-label `name`. References must be nonempty, unique within each constraint, and refer to these names. Unknown alignment keys and unsupported attributes are rejected. Topology and requested classes remain unique; use the existing `matchAttribute` format for repeated-class mixed-MIG bundles. Do not combine `alignments` with `alignment`, `fallback`, `matchAttribute`, or `rail: "true"`. All scoped constraints are required; they are never silently dropped or relaxed.
+
+The controller searches for bundles satisfying every constraint together. Shared counters are checked using their published capacities and driver/pool identities. Catalog counts are conservative packing results, not maximum packing or consumable-capacity availability guarantees. Only the stable aggregate class is published (`alignment=mixed`); Kubernetes chooses placement. No NUMA/PCIe placement variants are published for this format. Requesting count 2 creates two independent bundles, each satisfying both constraints; all counted devices within one named entry participate in its constraints, including split passthrough requests.
+
+```sh
+kubectl -n <config-namespace> apply -f examples/gpu-nic-numa-local.yaml
+dratopoctl offerings explain gpu-local-bundle
+dratopoctl claims expand --offering gpu-local-bundle --count 2
+```
+
+Scoped contracts use `PartitionConfig` `v1alpha3`; upgrade every controller/webhook replica and the CLI before applying them. Older webhooks reject this contract version. Existing singular-alignment and v1/v2 contracts retain their behavior. When converting an existing grouping with a feasible scoped bundle, old placement variants are deleted only after the replacement aggregate publishes successfully. A transient publication failure retains those variants for retry. If the valid desired scoped configuration has no feasible native topology bundle, obsolete classes (including the previous aggregate) are removed so a weaker old contract cannot remain available. Templates using removed variant names must migrate to the stable aggregate name. Before downgrading, remove or convert scoped ConfigMaps and let the current controller reconcile their classes. Existing allocated claims are not rewritten by this migration.
 
 ### Example, validation, and upgrades
 

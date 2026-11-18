@@ -40,6 +40,7 @@ type ContractRequest struct {
 }
 
 type ContractAlignment struct {
+	Scope       string   `json:"scope,omitempty"`
 	Attribute   string   `json:"attribute"`
 	Requests    []string `json:"requests"`
 	Enforcement string   `json:"enforcement"`
@@ -112,6 +113,7 @@ func buildContract(dc resourcev1.DeviceClass) (Contract, error) {
 	for _, alignment := range config.Alignments {
 		alignments = append(alignments, ContractAlignment{
 			Attribute:   alignment.Attribute,
+			Scope:       alignment.Scope,
 			Requests:    append([]string(nil), alignment.Requests...),
 			Enforcement: string(alignment.Enforcement),
 		})
@@ -194,7 +196,7 @@ func partitionConfig(dc resourcev1.DeviceClass) (controller.PartitionConfig, err
 		if partition.Kind != "PartitionConfig" {
 			continue
 		}
-		if partition.APIVersion != "" && partition.APIVersion != controller.PartitionConfigAPIVersion && partition.APIVersion != controller.PartitionConfigV1Alpha2 {
+		if partition.APIVersion != "" && partition.APIVersion != controller.PartitionConfigAPIVersion && partition.APIVersion != controller.PartitionConfigV1Alpha2 && partition.APIVersion != controller.PartitionConfigV1Alpha3 {
 			return controller.PartitionConfig{}, fmt.Errorf("managed DeviceClass %q has unsupported PartitionConfig apiVersion %q", dc.Name, partition.APIVersion)
 		}
 		if err := partition.Validate(); err != nil {
@@ -261,6 +263,9 @@ func writeContractTable(w io.Writer, contract Contract) error {
 		}
 		for _, alignment := range contract.Alignments {
 			requests := strings.Join(alignment.Requests, ", ")
+			if alignment.Scope != "" {
+				requests += " (scope: " + alignment.Scope + ")"
+			}
 			if _, err := fmt.Fprintf(tw, "  %s\t%s\t%s\n", alignment.Attribute, alignment.Enforcement, requests); err != nil {
 				return err
 			}
