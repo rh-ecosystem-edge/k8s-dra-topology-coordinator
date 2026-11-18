@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -256,4 +257,54 @@ func TestPartitionConfigV3StrictNamedScopes(t *testing.T) {
 	old := config
 	old.APIVersion = PartitionConfigV1Alpha2
 	require.Error(t, old.Validate())
+}
+
+func TestScopedCountedSearchAvoidsPermutations(t *testing.T) {
+	for _, root := range []string{"root-a", "root-b"} {
+		t.Run(root, func(t *testing.T) {
+			model, g := scopedTopology(t, root, 0)
+			g.Devices = g.Devices[:2]
+			g.Devices[0].Count = 16
+			g.Alignments = []GroupingAlignment{{Attribute: AttrPCIeRoot, Requests: []string{"gpu", "nic"}}}
+			var devices []resourcev1.Device
+			for i := 0; i < 16; i++ {
+				devices = append(devices, resourcev1.Device{Name: fmt.Sprintf("gpu-%02d", i), Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{resourcev1.QualifiedName(AttrPCIeRoot): {StringValue: strPtr("root-a")}}})
+			}
+			model.UpdateFromResourceSlice(makeResourceSlice("gpu", "gpu.example", "node-1", "pool", devices))
+			done := make(chan []GroupingResult, 1)
+			go func() { done <- NewGroupingBuilder(model, NewTopologyRuleStore()).BuildGroupings([]DeviceGrouping{g}) }()
+			select {
+			case got := <-done:
+				if root == "root-a" {
+					require.Len(t, got, 1)
+					require.Len(t, got[0].Instances[0].Devices, 17)
+				} else {
+					require.Empty(t, got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("counted search enumerated equivalent permutations")
+			}
+		})
+	}
+}
+
+func TestScopedUnsatisfiableConversionRemovesLegacyClasses(t *testing.T) {
+	model, g := scopedTopology(t, "root-a", 0)
+	builder := NewGroupingBuilder(model, NewTopologyRuleStore())
+	legacy := builder.BuildGroupings([]DeviceGrouping{g})[0].Instances[0]
+	legacy.Alignments = nil
+	legacy.Alignment = "pcieRoot"
+	legacy.Rail = true
+	client := fake.NewSimpleClientset()
+	manager := NewDeviceClassManager(client, CoordinatorDriverName, NewTopologyRuleStore())
+	ctx := context.Background()
+	require.NoError(t, manager.SyncGroupingDeviceClasses(ctx, []GroupingResult{{Instances: []GroupingInstance{legacy}}}))
+	// A valid desired scoped contract with no native topology witness must not leave the old weaker contract available.
+	model, _ = scopedTopology(t, "root-b", 0)
+	results := NewGroupingBuilder(model, NewTopologyRuleStore()).BuildGroupings([]DeviceGrouping{g})
+	require.Empty(t, results)
+	require.NoError(t, manager.SyncGroupingDeviceClasses(ctx, results))
+	classes, err := client.ResourceV1().DeviceClasses().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, classes.Items)
 }

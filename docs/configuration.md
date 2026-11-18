@@ -143,7 +143,7 @@ dratopoctl offerings explain gpu-local-bundle
 dratopoctl claims expand --offering gpu-local-bundle --count 2
 ```
 
-Scoped contracts use `PartitionConfig` `v1alpha3`; upgrade every controller/webhook replica and the CLI before applying them. Older webhooks reject this contract version. Existing singular-alignment and v1/v2 contracts retain their behavior. When converting an existing grouping, old placement variants are deleted only after the replacement aggregate publishes successfully; templates using those variant names must migrate to the stable aggregate name. Before downgrading, remove or convert scoped ConfigMaps and let the current controller reconcile their classes. Existing allocated claims are not rewritten by this migration.
+Scoped contracts use `PartitionConfig` `v1alpha3`; upgrade every controller/webhook replica and the CLI before applying them. Older webhooks reject this contract version. Existing singular-alignment and v1/v2 contracts retain their behavior. When converting an existing grouping with a feasible scoped bundle, old placement variants are deleted only after the replacement aggregate publishes successfully. A transient publication failure retains those variants for retry. If the valid desired scoped configuration has no feasible native topology bundle, obsolete classes (including the previous aggregate) are removed so a weaker old contract cannot remain available. Templates using removed variant names must migrate to the stable aggregate name. Before downgrading, remove or convert scoped ConfigMaps and let the current controller reconcile their classes. Existing allocated claims are not rewritten by this migration.
 
 ### Example, validation, and upgrades
 

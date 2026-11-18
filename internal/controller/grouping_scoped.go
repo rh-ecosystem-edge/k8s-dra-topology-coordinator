@@ -40,13 +40,20 @@ func (b *GroupingBuilder) findScopedInstances(node string, devices []TopologyDev
 	for {
 		values := map[int]string{}
 		var picked []TopologyDevice
-		var search func(int) bool
-		search = func(index int) bool {
+		var search func(int, int) bool
+		search = func(index, start int) bool {
 			if index == len(slots) {
 				return true
 			}
 			entry := slots[index]
-			for _, dev := range pools[entry.Name] {
+			// Identical entry slots choose combinations, not permutations.
+			remaining := 1
+			for next := index + 1; next < len(slots) && slots[next].Name == entry.Name; next++ {
+				remaining++
+			}
+			pool := pools[entry.Name]
+			for candidateIndex := start; candidateIndex <= len(pool)-remaining; candidateIndex++ {
+				dev := pool[candidateIndex]
 				key := deviceKey(dev)
 				if taken[key] {
 					continue
@@ -110,7 +117,11 @@ func (b *GroupingBuilder) findScopedInstances(node string, devices []TopologyDev
 				}
 				taken[key] = true
 				picked = append(picked, dev)
-				if search(index + 1) {
+				nextStart := 0
+				if index+1 < len(slots) && slots[index+1].Name == entry.Name {
+					nextStart = candidateIndex + 1
+				}
+				if search(index+1, nextStart) {
 					return true
 				}
 				picked = picked[:len(picked)-1]
@@ -126,7 +137,7 @@ func (b *GroupingBuilder) findScopedInstances(node string, devices []TopologyDev
 			}
 			return false
 		}
-		if !search(0) {
+		if !search(0, 0) {
 			return results
 		}
 		inst := b.buildInstance(fmt.Sprintf("%s-%s-mixed-%d", node, grouping.Name, len(results)), node, grouping, "mixed", picked)
