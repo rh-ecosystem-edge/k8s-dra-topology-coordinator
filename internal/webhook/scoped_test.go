@@ -56,18 +56,27 @@ func TestScopedAdmissionCountsAndCallerRemapping(t *testing.T) {
 				}
 			}
 			require.Len(t, got, 5)
-			wantPCI := []string{"bundle-0-gpu", "bundle-0-nic"}
-			wantNUMA := []string{"bundle-0-gpu", "bundle-0-cpu", "bundle-0-memory"}
-			if passthrough {
-				wantPCI = []string{"bundle-0-gpu-0", "bundle-0-gpu-1", "bundle-0-nic-0", "bundle-0-nic-1"}
-				wantNUMA = []string{"bundle-0-gpu-0", "bundle-0-gpu-1", "bundle-0-cpu", "bundle-0-memory"}
+			var wantCallerPCI []string
+			for bundle := 0; bundle < 2; bundle++ {
+				prefix := fmt.Sprintf("bundle-%d", bundle)
+				wantPCI := []string{prefix + "-gpu", prefix + "-nic"}
+				wantNUMA := []string{prefix + "-gpu", prefix + "-cpu", prefix + "-memory"}
+				if passthrough {
+					wantPCI = []string{prefix + "-gpu-0", prefix + "-gpu-1", prefix + "-nic-0", prefix + "-nic-1"}
+					wantNUMA = []string{prefix + "-gpu-0", prefix + "-gpu-1", prefix + "-cpu", prefix + "-memory"}
+				}
+				pci, numa := got[1+2*bundle], got[2+2*bundle]
+				require.NotNil(t, pci.MatchAttribute)
+				require.Equal(t, resourcev1.FullyQualifiedName(controller.AttrPCIeRoot), *pci.MatchAttribute)
+				require.ElementsMatch(t, wantPCI, pci.Requests)
+				require.NotNil(t, numa.MatchAttribute)
+				require.Equal(t, resourcev1.FullyQualifiedName(controller.AttrNUMANode), *numa.MatchAttribute)
+				require.ElementsMatch(t, wantNUMA, numa.Requests)
+				wantCallerPCI = append(wantCallerPCI, wantPCI...)
 			}
-			require.ElementsMatch(t, wantPCI, got[1].Requests)
-			require.ElementsMatch(t, wantNUMA, got[2].Requests)
-			for _, name := range got[0].Requests {
-				require.NotContains(t, name, "cpu")
-				require.NotContains(t, name, "memory")
-			}
+			require.NotNil(t, got[0].MatchAttribute)
+			require.Equal(t, attr, *got[0].MatchAttribute)
+			require.ElementsMatch(t, wantCallerPCI, got[0].Requests)
 		})
 	}
 }
